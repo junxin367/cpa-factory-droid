@@ -1,0 +1,285 @@
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use uuid::Uuid;
+
+use crate::{host::encode, protocol::Format, Fault, Result, Runtime, PROVIDER};
+
+pub const HEADER: &str = "X-Factory-Droid-Approval";
+const MAX_APPROVALS: usize = 4096;
+const TTL: Duration = Duration::from_secs(60);
+
+struct Approval {
+    auth_id: String,
+    model: String,
+    source: String,
+    path: String,
+    stream: bool,
+    created: Instant,
+}
+#[derive(Default)]
+pub struct Approvals {
+    entries: HashMap<String, Approval>,
+}
+impl Approvals {
+    fn issue(
+        &mut self,
+        auth_id: &str,
+        model: &str,
+        source: &str,
+        path: &str,
+        stream: bool,
+    ) -> Result<String> {
+        self.entries.retain(|_, a| a.created.elapsed() < TTL);
+        if self.entries.len() >= MAX_APPROVALS {
+            return Err(Fault::new(
+                503,
+                "protocol_guard_failed",
+                "原生协议校验并发已达上限，请稍后重试",
+            ));
+        }
+        let nonce = Uuid::new_v4().to_string();
+        self.entries.insert(
+            nonce.clone(),
+            Approval {
+                auth_id: auth_id.into(),
+                model: model.into(),
+                source: source.into(),
+                path: path.into(),
+                stream,
+                created: Instant::now(),
+            },
+        );
+        Ok(nonce)
+    }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+    fn consume(&mut self, nonce: &str, data: &Value, expected: Format) -> Result<()> {
+        let approved = self.entries.remove(nonce).ok_or_else(missing)?;
+        if approved.created.elapsed() >= TTL
+            || data["AuthID"].as_str() != Some(&approved.auth_id)
+            || data["Model"].as_str() != Some(&approved.model)
+            || data["SourceFormat"].as_str() != Some(&approved.source)
+            || approved.source != expected.cpa()
+            || data["Metadata"]["request_path"].as_str() != Some(&approved.path)
+            || approved.path != expected.endpoint()
+            || data["Stream"].as_bool().unwrap_or(false) != approved.stream
+        {
+            return Err(missing());
+        }
+        Ok(())
+    }
+}
+fn missing() -> Fault {
+    Fault::new(
+        400,
+        "protocol_guard_missing",
+        "缺少有效的一次性原生协议校验凭证，请通过该模型对应的标准 CPA HTTP 端点调用",
+    )
+}
+pub fn error_body(error: &Fault) -> Value {
+    json!({"error":{"type":if error.http_status>=500{"api_error"}else{"invalid_request_error"},
+        "code":error.code,"message":error.message}})
+}
+pub fn http_fault(mut error: Fault) -> Fault {
+    error.message = error_body(&error).to_string();
+    error
+}
+pub fn terminate(error: Fault) -> Value {
+    json!({"Terminate":true,"StatusCode":error.http_status,
+        "ResponseHeaders":{"Content-Type":["application/json; charset=utf-8"],"Cache-Control":["no-store"]},
+        "ResponseBody":encode(error_body(&error).to_string())})
+}
+pub fn header_values<'a>(headers: &'a Value, name: &str) -> Vec<&'a str> {
+    headers
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .flat_map(|(_, value)| {
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect()
+}
+pub fn clean_headers(headers: &Value) -> Value {
+    let mut clean = headers.clone();
+    if let Some(map) = clean.as_object_mut() {
+        map.retain(|key, _| !key.eq_ignore_ascii_case(HEADER));
+    }
+    clean
+}
+fn check_route(data: &Value, expected: Format) -> Result<()> {
+    if data["Metadata"]["request_path"].as_str() != Some(expected.endpoint()) {
+        return Err(expected.mismatch(
+            data["SourceFormat"].as_str().unwrap_or("未知"),
+            "请求路径或操作不匹配",
+        ));
+    }
+    let upgraded = header_values(&data["Headers"], "Upgrade")
+        .iter()
+        .any(|v| !v.trim().is_empty())
+        || header_values(&data["Headers"], "Connection")
+            .iter()
+            .any(|v| {
+                v.split(',')
+                    .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+            });
+    if upgraded {
+        return Err(Fault::new(
+            400,
+            "unsupported_operation",
+            "Factory Droid 只支持对应的标准 HTTP JSON/SSE 调用，不支持 WebSocket/Upgrade",
+        ));
+    }
+    Ok(())
+}
+pub fn validate(rt: &Runtime, data: &Value, expected: Format) -> Result<Value> {
+    expected.check_formats(data)?;
+    check_route(data, expected)?;
+    if data["AuthProvider"].as_str() != Some(PROVIDER)
+        || data["AuthID"].as_str().is_none_or(str::is_empty)
+    {
+        return Err(missing());
+    }
+    if data["Alt"].as_str().is_some_and(|alt| !alt.is_empty()) {
+        return Err(Fault::new(
+            400,
+            "unsupported_operation",
+            "Factory Droid 未实现此原生操作后缀，请使用模型对应的标准生成端点",
+        ));
+    }
+    let values = header_values(&data["Headers"], HEADER);
+    if values.len() != 1 || values[0].len() > 64 {
+        return Err(missing());
+    }
+    rt.approvals
+        .lock()
+        .map_err(|_| Fault::new(503, "protocol_guard_failed", "原生协议校验状态不可用"))?
+        .consume(values[0], data, expected)?;
+    Ok(clean_headers(&data["Headers"]))
+}
+fn known_factory_auth(rt: &Runtime, auth_id: &str) -> bool {
+    !auth_id.is_empty()
+        && rt
+            .lock()
+            .ok()
+            .is_some_and(|store| store.account_for_auth(auth_id).is_some())
+}
+pub fn after(rt: &Arc<Runtime>, data: &Value) -> Value {
+    let auth_id = data["Metadata"]["selected_auth_id"].as_str().unwrap_or("");
+    let auth_index = data["Metadata"]["selected_auth_index"]
+        .as_str()
+        .unwrap_or("");
+    let mut factory_scope = known_factory_auth(rt, auth_id);
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Value> {
+        if auth_index.is_empty() {
+            return if factory_scope {
+                Err(Fault::new(
+                    503,
+                    "protocol_guard_failed",
+                    "Factory 凭据缺少宿主运行时索引，已停止请求",
+                ))
+            } else {
+                Ok(json!({}))
+            };
+        }
+        let runtime = match rt
+            .host
+            .call("host.auth.get_runtime", &json!({"auth_index":auth_index}))
+        {
+            Ok(v) => v,
+            Err(_) => {
+                return if factory_scope {
+                    Err(Fault::new(
+                        503,
+                        "protocol_guard_failed",
+                        "无法确认 Factory 凭据运行时状态，已停止请求",
+                    ))
+                } else {
+                    Ok(json!({}))
+                }
+            }
+        };
+        let auth = &runtime["auth"];
+        let provider = auth["provider"]
+            .as_str()
+            .or_else(|| auth["type"].as_str())
+            .unwrap_or("");
+        if provider.is_empty() && factory_scope {
+            return Err(Fault::new(
+                503,
+                "protocol_guard_failed",
+                "Factory 宿主运行时缺少 provider，已停止请求",
+            ));
+        }
+        if provider != PROVIDER {
+            factory_scope = false;
+            return Ok(json!({}));
+        }
+        factory_scope = true;
+        if auth_id.is_empty()
+            || auth["id"].as_str() != Some(auth_id)
+            || auth["auth_index"].as_str() != Some(auth_index)
+        {
+            return Err(Fault::new(
+                503,
+                "protocol_guard_failed",
+                "Factory 凭据标识与宿主运行时不一致，已停止请求",
+            ));
+        }
+        if auth["disabled"].as_bool() == Some(true) {
+            return Err(Fault::new(403, "account_disabled", "Factory 账号已停用"));
+        }
+        let model_id = data["Model"].as_str().unwrap_or("");
+        let model = rt.model(model_id)?;
+        let expected = Format::for_model(&model)?;
+        let source = data["SourceFormat"].as_str().unwrap_or("");
+        if source != expected.cpa() || data["ToFormat"].as_str() != Some(expected.cpa()) {
+            return Err(expected.mismatch(source, "调用协议与模型协议不匹配"));
+        }
+        check_route(data, expected)?;
+        {
+            let store = rt.lock()?;
+            let account = store.account_for_auth(auth_id).ok_or_else(|| {
+                Fault::new(
+                    403,
+                    "model_not_allowed",
+                    "Factory账号尚未完成当前模型的允许验证",
+                )
+            })?;
+            store.ensure_model_allowed(&account.id, &model)?;
+        }
+        let nonce = rt
+            .approvals
+            .lock()
+            .map_err(|_| Fault::new(503, "protocol_guard_failed", "原生协议校验状态不可用"))?
+            .issue(
+                auth_id,
+                model_id,
+                source,
+                expected.endpoint(),
+                data["Stream"].as_bool().unwrap_or(false),
+            )?;
+        let mut headers = json!({});
+        headers[HEADER] = json!([nonce]);
+        Ok(json!({"ClearHeaders":[HEADER],"Headers":headers}))
+    }));
+    match attempt {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) if factory_scope => terminate(error),
+        Err(_) if factory_scope => terminate(Fault::new(
+            503,
+            "protocol_guard_failed",
+            "Factory 原生协议校验失败，已停止请求",
+        )),
+        _ => json!({}),
+    }
+}

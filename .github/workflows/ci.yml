@@ -1,0 +1,73 @@
+name: 构建检查
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CPA_PLUGIN_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+
+jobs:
+  build:
+    name: 检查 ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            goos: windows
+          - platform: linux-amd64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            goos: linux
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 检查 Rust 工具链
+        run: rustup show active-toolchain
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: 检查 Rust 格式
+        run: cargo fmt --check
+      - name: 检查发布脚本语法
+        run: node --check scripts/release.mjs
+      - name: 检查前端脚本语法
+        run: node --check web/app.js
+      - name: 检查插件注册表
+        run: node scripts/release.mjs registry
+      - name: 运行 Rust 测试
+        run: cargo test --locked
+      - name: 构建插件安装包
+        shell: pwsh
+        run: ./scripts/build.ps1 -Target '${{ matrix.target }}' -ReleaseAssets
+      - name: 验证 Linux GLIBC 兼容基线
+        if: matrix.goos == 'linux'
+        run: node scripts/check-linux-runtime.mjs target/${{ matrix.target }}/release/libcpa_factory_droid.so 2.35
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-droid-${{ matrix.platform }}
+          path: release/factory-droid_*_${{ matrix.goos }}_amd64.zip
+          if-no-files-found: error
+          retention-days: 7

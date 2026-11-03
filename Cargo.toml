@@ -1,0 +1,27 @@
+[package]
+name = "cpa-factory-droid"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Factory Droid native provider plugin for CLIProxyAPI"
+license = "MIT"
+repository = "https://github.com/junxin367/cpa-factory-droid"
+
+[lib]
+name = "cpa_factory_droid"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_yaml = "0.9"
+sha2 = "0.11"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+panic = "unwind"
