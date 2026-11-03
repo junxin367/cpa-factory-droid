@@ -11,6 +11,8 @@ const repository = "junxin367/cpa-factory-droid";
 const platforms = [
   { os: "windows", arch: "amd64" },
   { os: "linux", arch: "amd64" },
+  { os: "darwin", arch: "amd64" },
+  { os: "darwin", arch: "arm64" },
 ];
 const semanticVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
@@ -171,7 +173,8 @@ function manifest(input, output) {
   if (!release.url) throw new Error("Release 缺少页面地址。");
   const payload = {
     version: `v${version}`,
-    url: release.url,
+    // Draft html_url may use an untagged URL; the published address is fixed.
+    url: `https://github.com/${repository}/releases/tag/${release.tagName}`,
     body: release.body ?? "",
     assets: files.map(({ name, url }) => ({ name, url })).sort((a, b) => a.name.localeCompare(b.name)),
   };
@@ -180,6 +183,15 @@ function manifest(input, output) {
 
 function notes(tag) {
   const version = parseTag(tag);
+  const curated = join(root, "docs", "releases", `${tag}.md`);
+  try {
+    const text = readFileSync(curated, "utf8");
+    if (!text.includes(tag)) throw new Error("发布说明与标签不一致。");
+    process.stdout.write(text);
+    return;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   let previous = "";
   try {
     previous = execute("git", ["describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", `${tag}^`]);

@@ -101,9 +101,44 @@ pub fn auth_data(cred: &Value, id: &str, file: &str) -> Value {
         // Unknown plugin providers need an explicit interval to enter CPA's refresh scheduler.
         data["Metadata"]["refresh_interval_seconds"] = json!(300);
         data["Metadata"]["auth_method"] = json!("oauth");
+    } else {
+        // NextRefreshAfter is only a lower bound in CPA. Unknown plugin
+        // providers also need an interval to enter the host refresh scheduler.
+        data["Metadata"]["refresh_interval_seconds"] = json!(86400);
+        data["Metadata"]["last_refresh"] = cred["factory_catalog_checked_at"].clone();
     }
     data
 }
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn key_catalog_refresh_is_scheduled_without_exposing_the_key() {
+        let cred = json!({"account_id":"factory-test","api_key":"fk-test-private",
+            "factory_catalog_checked_at":"2026-01-01T00:00:00Z"});
+        let auth = auth_data(&cred, "credential", "credential.json");
+        assert_eq!(auth["Metadata"]["refresh_interval_seconds"], 86400);
+        assert_eq!(auth["Metadata"]["last_refresh"], "2026-01-01T00:00:00Z");
+        let due = chrono::DateTime::parse_from_rfc3339(auth["NextRefreshAfter"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(due.to_rfc3339(), "2026-01-02T00:00:00+00:00");
+        assert!(!auth["Metadata"].to_string().contains("fk-test-private"));
+        assert!(!auth["Attributes"].to_string().contains("fk-test-private"));
+    }
+
+    #[test]
+    fn oauth_keeps_its_token_refresh_schedule() {
+        let cred = json!({"account_id":"factory-test","auth_method":"oauth",
+            "expires_at":"2099-01-01T00:00:00Z","last_refresh":"2026-01-01T00:00:00Z"});
+        let auth = auth_data(&cred, "credential", "credential.json");
+        assert_eq!(auth["Metadata"]["refresh_interval_seconds"], 300);
+        assert_eq!(auth["Metadata"]["last_refresh"], cred["last_refresh"]);
+        assert_eq!(auth["NextRefreshAfter"], "2098-12-31T23:58:00+00:00");
+    }
+}
+
 pub fn bearer(cred: &Value) -> &str {
     cred[if oauth::is_oauth(cred) {
         "access_token"
@@ -657,10 +692,28 @@ pub fn refresh_auth(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
     if oauth::is_oauth(&cred) {
         return oauth::refresh(rt, data, cred);
     }
+    let _active = rt.begin()?;
+    if cred["disabled"].as_bool() == Some(true) {
+        return Err(Fault::new(
+            409,
+            "account_disabled",
+            "账号已停用，未执行刷新",
+        ));
+    }
     let id = cred["account_id"]
         .as_str()
         .ok_or_else(|| Fault::input("账号 ID 缺失"))?
         .to_string();
+    // Refresh can be scheduled before CPA's first model discovery callback.
+    if !rt.lock()?.accounts.contains_key(&id) {
+        let fallback = format!("factory-droid-{id}.json");
+        let file = std::path::Path::new(data["AuthID"].as_str().unwrap_or(&fallback))
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| valid_auth_filename(name))
+            .unwrap_or(&fallback);
+        observe_model_account(rt, &cred, file)?;
+    }
     let revision = {
         let store = rt.lock()?;
         store

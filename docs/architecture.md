@@ -82,7 +82,7 @@ CPA 管理端负责统计历史及价格，插件不消费 usage queue，不修�
 
 CPA 官方管理前端有通用插件菜单和 quota 渲染；第三方管理端是否消费相同扩展需分别核查。`seakee/CPA-Manager-Plus v1.14.10` 原版按固定 provider 实现 quota 卡片；本仓库提供通用插件额度适配补丁，并已部署到本机 Manager。
 
-商店注册表采用 CPA schema 1。ZIP 名遵循 `factory-droid_<version>_<goos>_<goarch>.zip`，动态库必须位于 ZIP 根目录，Release 提供校验和。当前流水线仅覆盖 Windows x64 与 Linux x64。注册表是安装描述，不能代替实际 Release 的存在。
+商店注册表采用 CPA schema 1。ZIP 名遵循 `factory-droid_<version>_<goos>_<goarch>.zip`，动态库必须位于 ZIP 根目录，Release 提供校验和。发布矩阵覆盖 Windows x64、Linux x64、macOS Intel 与 Apple Silicon；四个平台通过真实 CPA 宿主的模拟上游回归后才公开 Release。注册表是安装描述，不能代替实际 Release 的存在。
 
 Windows DLL 使用 MSVC 动态运行库，依赖 `VCRUNTIME140` / UCRT；安装环境需要 x64 Microsoft Visual C++ v14 Redistributable，版本不低于构建工具集 MSVC 14.44。Linux 在 Ubuntu 22.04 构建，CI 使用 `scripts/check-linux-runtime.mjs` 调用 `readelf`，断言最高 GLIBC 导入版本不超过 2.35。
 

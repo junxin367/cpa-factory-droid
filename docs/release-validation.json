@@ -1,0 +1,292 @@
+{
+  "version": "0.1.1",
+  "date": "2026-11-04",
+  "host": "CPA v8.0.52",
+  "library_profile": "debug",
+  "before": {
+    "at": "2026-11-03T22:21:42.247124+00:00",
+    "host": "CPA v8.0.52",
+    "platform": "Windows",
+    "library_sha256": "4fa4338f4bc709e02cc2d74d8e5a3181926a5a0197bc5622d2ce41ae8be35010",
+    "real_upstream": false,
+    "checks": [
+      {
+        "name": "原生凭据创建并发布模型",
+        "passed": true
+      },
+      {
+        "name": "初始目录已同步",
+        "passed": true
+      },
+      {
+        "name": "共享缓存组不合并明确对话",
+        "passed": true
+      },
+      {
+        "name": "切换缓存组不改变会话身份",
+        "passed": true
+      },
+      {
+        "name": "同名子代理的不同线程独立",
+        "passed": false
+      },
+      {
+        "name": "同一子线程跨轮次稳定",
+        "passed": true
+      },
+      {
+        "name": "不同调用方隔离",
+        "passed": true
+      },
+      {
+        "name": "安全标识与对话分别映射",
+        "passed": true
+      },
+      {
+        "name": "只有缓存键不建立共享对话",
+        "passed": true
+      },
+      {
+        "name": "16 个并发会话身份与正文独立",
+        "passed": true
+      },
+      {
+        "name": "保留原生续接字段",
+        "passed": true
+      },
+      {
+        "name": "上游包装移除反代元数据",
+        "passed": true
+      },
+      {
+        "name": "anthropic 原生非流式请求",
+        "passed": true
+      },
+      {
+        "name": "anthropic 原生流式请求",
+        "passed": true
+      },
+      {
+        "name": "responses 原生非流式请求",
+        "passed": true
+      },
+      {
+        "name": "responses 原生流式请求",
+        "passed": true
+      },
+      {
+        "name": "chat 原生非流式请求",
+        "passed": true
+      },
+      {
+        "name": "chat 原生流式请求",
+        "passed": true
+      },
+      {
+        "name": "缓存断点原样保留",
+        "passed": true
+      },
+      {
+        "name": "重启后匿名会话和缓存稳定",
+        "passed": true
+      },
+      {
+        "name": "CPA 原生排除、别名和前缀生效",
+        "passed": true
+      },
+      {
+        "name": "原生规则不导致目录降级",
+        "passed": false
+      },
+      {
+        "name": "原生规则下手工同步成功",
+        "passed": false
+      },
+      {
+        "name": "原生别名可调用",
+        "passed": true
+      },
+      {
+        "name": "CPA 支持隐藏全部模型",
+        "passed": true
+      },
+      {
+        "name": "全部模型被排除仍视为正常",
+        "passed": false
+      },
+      {
+        "name": "API Key 目录到期后由 CPA 自动刷新",
+        "passed": false
+      },
+      {
+        "name": "目录刷新不改变凭证标识",
+        "passed": true
+      },
+      {
+        "name": "原生 OAuth 创建设备授权",
+        "passed": true
+      },
+      {
+        "name": "原生 OAuth 完成模拟授权",
+        "passed": true
+      },
+      {
+        "name": "OAuth 到期后轮换并持久化令牌",
+        "passed": true
+      },
+      {
+        "name": "插件状态不保存凭证或令牌",
+        "passed": true
+      },
+      {
+        "name": "最终目录和健康状态正常",
+        "passed": true
+      }
+    ]
+  },
+  "after": {
+    "at": "2026-11-03T22:21:10.249828+00:00",
+    "host": "CPA v8.0.52",
+    "platform": "Windows",
+    "library_sha256": "71f00fbf714c01ee9435866fe09c91a13832ab4ec72cb8c202ac31b1e2f81fe3",
+    "real_upstream": false,
+    "checks": [
+      {
+        "name": "原生凭据创建并发布模型",
+        "passed": true
+      },
+      {
+        "name": "初始目录已同步",
+        "passed": true
+      },
+      {
+        "name": "共享缓存组不合并明确对话",
+        "passed": true
+      },
+      {
+        "name": "切换缓存组不改变会话身份",
+        "passed": true
+      },
+      {
+        "name": "同名子代理的不同线程独立",
+        "passed": true
+      },
+      {
+        "name": "同一子线程跨轮次稳定",
+        "passed": true
+      },
+      {
+        "name": "不同调用方隔离",
+        "passed": true
+      },
+      {
+        "name": "安全标识与对话分别映射",
+        "passed": true
+      },
+      {
+        "name": "只有缓存键不建立共享对话",
+        "passed": true
+      },
+      {
+        "name": "16 个并发会话身份与正文独立",
+        "passed": true
+      },
+      {
+        "name": "保留原生续接字段",
+        "passed": true
+      },
+      {
+        "name": "上游包装移除反代元数据",
+        "passed": true
+      },
+      {
+        "name": "anthropic 原生非流式请求",
+        "passed": true
+      },
+      {
+        "name": "anthropic 原生流式请求",
+        "passed": true
+      },
+      {
+        "name": "responses 原生非流式请求",
+        "passed": true
+      },
+      {
+        "name": "responses 原生流式请求",
+        "passed": true
+      },
+      {
+        "name": "chat 原生非流式请求",
+        "passed": true
+      },
+      {
+        "name": "chat 原生流式请求",
+        "passed": true
+      },
+      {
+        "name": "缓存断点原样保留",
+        "passed": true
+      },
+      {
+        "name": "重启后匿名会话和缓存稳定",
+        "passed": true
+      },
+      {
+        "name": "CPA 原生排除、别名和前缀生效",
+        "passed": true
+      },
+      {
+        "name": "原生规则不导致目录降级",
+        "passed": true
+      },
+      {
+        "name": "原生规则下手工同步成功",
+        "passed": true
+      },
+      {
+        "name": "原生别名可调用",
+        "passed": true
+      },
+      {
+        "name": "CPA 支持隐藏全部模型",
+        "passed": true
+      },
+      {
+        "name": "全部模型被排除仍视为正常",
+        "passed": true
+      },
+      {
+        "name": "API Key 目录到期后由 CPA 自动刷新",
+        "passed": true
+      },
+      {
+        "name": "目录刷新不改变凭证标识",
+        "passed": true
+      },
+      {
+        "name": "原生 OAuth 创建设备授权",
+        "passed": true
+      },
+      {
+        "name": "原生 OAuth 完成模拟授权",
+        "passed": true
+      },
+      {
+        "name": "OAuth 到期后轮换并持久化令牌",
+        "passed": true
+      },
+      {
+        "name": "插件状态不保存凭证或令牌",
+        "passed": true
+      },
+      {
+        "name": "最终目录和健康状态正常",
+        "passed": true
+      }
+    ]
+  },
+  "unit_tests": 14,
+  "real_factory_inference": false,
+  "real_factory_oauth": false,
+  "release_validation": "每个平台的最终安装库另由 GitHub 发布任务执行相同宿主检查"
+}

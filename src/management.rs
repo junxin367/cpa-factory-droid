@@ -15,6 +15,184 @@ use crate::{
 
 pub const PREFIX: &str = "/v0/management/plugins/factory-droid";
 pub const RESOURCE: &str = "/v0/resource/plugins/factory-droid";
+
+#[derive(Clone)]
+pub(crate) struct CatalogObservation {
+    pub revision: String,
+    offered: BTreeSet<String>,
+    host_managed: bool,
+    empty_allowed: bool,
+}
+
+impl CatalogObservation {
+    pub fn new(data: &Value, credential: &Value, offered: BTreeSet<String>) -> Self {
+        let populated = |value: &Value| match value {
+            Value::Array(rows) => !rows.is_empty(),
+            Value::String(text) => {
+                let text = text.trim();
+                !text.is_empty() && text != "[]" && text != "{}"
+            }
+            _ => false,
+        };
+        let host_managed = populated(&data["Host"]["ExcludedModels"][PROVIDER])
+            || populated(&data["Host"]["OAuthModelAlias"][PROVIDER])
+            || populated(&data["Attributes"]["excluded_models"])
+            || populated(&data["Attributes"]["model_aliases"])
+            || populated(&credential["prefix"]);
+        let local = data["Attributes"]["excluded_models"].as_str().unwrap_or("");
+        let exclusions: Vec<&str> = if !local.trim().is_empty() {
+            local
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect()
+        } else {
+            data["Host"]["ExcludedModels"][PROVIDER]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect()
+        };
+        let empty_allowed = offered
+            .iter()
+            .all(|model| exclusions.iter().any(|pattern| wildcard(pattern, model)));
+        Self {
+            revision: credential["factory_catalog_revision"]
+                .as_str()
+                .unwrap_or("")
+                .into(),
+            offered,
+            host_managed,
+            empty_allowed,
+        }
+    }
+}
+
+fn publication_matches(
+    enabled: bool,
+    desired: &BTreeSet<String>,
+    published: Option<&BTreeSet<String>>,
+    observed: Option<&CatalogObservation>,
+) -> bool {
+    if !enabled {
+        return published.is_none_or(BTreeSet::is_empty);
+    }
+    let (Some(published), Some(observed)) = (published, observed) else {
+        return false;
+    };
+    if observed.offered != *desired {
+        return false;
+    }
+    // CPA owns exclusion, alias (including fork), and prefix rules. ABI 10
+    // exposes the final registry, but not the complete global rule semantics.
+    // Confirm delivery of this catalog, then accept the host's visible set.
+    // Without host rules, keep the strict full-catalog publication check.
+    (observed.host_managed && (!published.is_empty() || observed.empty_allowed))
+        || published == desired
+}
+
+fn wildcard(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.trim().to_lowercase();
+    let value = value.trim().to_lowercase();
+    let parts: Vec<_> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == value;
+    }
+    let Some(mut rest) = value.strip_prefix(parts[0]) else {
+        return false;
+    };
+    for part in &parts[1..parts.len() - 1] {
+        let Some(offset) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[offset + part.len()..];
+    }
+    rest.ends_with(parts[parts.len() - 1])
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    fn models(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn native_rules_may_filter_rename_or_hide_all_models() {
+        let offered = models(&["factory/a", "factory/b"]);
+        for context in [
+            json!({"Host":{"ExcludedModels":{PROVIDER:["factory/*"]}}}),
+            json!({"Host":{"OAuthModelAlias":{PROVIDER:[{"Name":"factory/a","Alias":"custom"}]}}}),
+            json!({"Attributes":{"excluded_models":"factory/b"}}),
+            json!({"Attributes":{"model_aliases":"[{\"name\":\"factory/a\",\"alias\":\"custom\"}]"}}),
+        ] {
+            let observed = CatalogObservation::new(&context, &json!({}), offered.clone());
+            for published in [models(&["factory/a"]), models(&["custom"])] {
+                assert!(publication_matches(
+                    true,
+                    &offered,
+                    Some(&published),
+                    Some(&observed)
+                ));
+            }
+        }
+        let observed =
+            CatalogObservation::new(&json!({}), &json!({"prefix":"team"}), offered.clone());
+        assert!(publication_matches(
+            true,
+            &offered,
+            Some(&models(&["team/factory/a"])),
+            Some(&observed)
+        ));
+        assert!(!publication_matches(
+            true,
+            &offered,
+            Some(&BTreeSet::new()),
+            Some(&observed)
+        ));
+        let hidden = CatalogObservation::new(
+            &json!({"Attributes":{"excluded_models":"FACTORY/*"}}),
+            &json!({}),
+            offered.clone(),
+        );
+        assert!(publication_matches(
+            true,
+            &offered,
+            Some(&BTreeSet::new()),
+            Some(&hidden)
+        ));
+    }
+
+    #[test]
+    fn missing_delivery_or_unexpected_unfiltered_loss_is_not_ready() {
+        let offered = models(&["factory/a", "factory/b"]);
+        let plain = CatalogObservation::new(&json!({}), &json!({}), offered.clone());
+        assert!(!publication_matches(
+            true,
+            &offered,
+            Some(&models(&["factory/a"])),
+            Some(&plain)
+        ));
+        assert!(!publication_matches(true, &offered, Some(&offered), None));
+        let managed =
+            CatalogObservation::new(&json!({}), &json!({"prefix":"team"}), offered.clone());
+        assert!(!publication_matches(true, &offered, None, Some(&managed)));
+        assert!(!publication_matches(
+            true,
+            &models(&["new"]),
+            Some(&offered),
+            Some(&managed)
+        ));
+        assert!(!publication_matches(
+            false,
+            &BTreeSet::new(),
+            Some(&offered),
+            Some(&managed)
+        ));
+    }
+}
 pub fn registration(data: &Value) -> Value {
     let base = data["BasePath"].as_str().unwrap_or("/v0/management");
     let routes:Vec<_>=[
@@ -184,6 +362,11 @@ pub fn observe_publication(rt: &Runtime) -> Result<()> {
             "CPA未返回有效的凭据模型注册集合",
         ));
     };
+    let observed = rt
+        .catalog_observed
+        .lock()
+        .map_err(|_| Fault::internal())?
+        .clone();
     let mut store = rt.lock()?;
     let mut published = BTreeMap::new();
     for account in store.accounts.values() {
@@ -199,7 +382,9 @@ pub fn observe_publication(rt: &Runtime) -> Result<()> {
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect();
-        published.insert(account.id.clone(), ids);
+        if row.is_some() {
+            published.insert(account.id.clone(), ids);
+        }
     }
     store.published_models = published;
     store.publication_known = true;
@@ -209,7 +394,12 @@ pub fn observe_publication(rt: &Runtime) -> Result<()> {
             .iter()
             .map(|m| m.id.clone())
             .collect();
-        store.published_models.get(&account.id) != Some(&desired)
+        !publication_matches(
+            account.enabled && !account.deleted,
+            &desired,
+            store.published_models.get(&account.id),
+            observed.get(&account.id),
+        )
     });
     rt.catalog_dirty.store(differs, Ordering::Release);
     Ok(())
@@ -256,9 +446,12 @@ fn await_catalog(rt: &Runtime, pending: &[CatalogPending]) -> Result<()> {
             .lock()
             .map_err(|_| Fault::internal())?
             .clone();
-        let discovered = pending
-            .iter()
-            .all(|p| !p.enabled || observed.get(&p.account) == Some(&p.revision));
+        let discovered = pending.iter().all(|p| {
+            !p.enabled
+                || observed
+                    .get(&p.account)
+                    .is_some_and(|entry| entry.revision == p.revision)
+        });
         if discovered {
             let published = rt.host.call("host.auth.models", &json!({}))?;
             observe_publication(rt)?;
@@ -281,7 +474,12 @@ fn await_catalog(rt: &Runtime, pending: &[CatalogPending]) -> Result<()> {
                             .filter_map(Value::as_str)
                             .map(str::to_string)
                             .collect();
-                        models == p.models
+                        publication_matches(
+                            p.enabled,
+                            &p.models,
+                            Some(&models),
+                            observed.get(&p.account),
+                        )
                     })
                     || !p.enabled
                         && p.models.is_empty()
@@ -387,15 +585,7 @@ fn reconcile_accounts(rt: &Runtime) -> Result<()> {
     }
     await_catalog(rt, &pending)?;
     observe_publication(rt)?;
-    let store = rt.lock()?;
-    if store.accounts.values().any(|account| {
-        let desired: BTreeSet<_> = store
-            .effective_models(&account.id)
-            .iter()
-            .map(|m| m.id.clone())
-            .collect();
-        store.published_models.get(&account.id) != Some(&desired)
-    }) {
+    if rt.catalog_dirty.load(Ordering::Acquire) {
         return Err(Fault::new(
             503,
             "catalog_refresh_incomplete",
@@ -450,7 +640,7 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
             Ok(
                 json!({"version":env!("CARGO_PKG_VERSION"),"provider":PROVIDER,
                 "health":if store.health_error.is_some()||catalog_dirty{"degraded"}else{"ready"},
-                "message":store.health_error.clone().or(catalog_error).or_else(||catalog_dirty.then(||"模型目录尚未同步完成，请重新保存设置并检查宿主注册状态".into())),
+                "message":store.health_error.clone().or_else(||catalog_dirty.then(||catalog_error.unwrap_or_else(||"模型目录尚未交付完成，请检查宿主凭据加载状态".into()))),
                 "account_count":count,"enabled_accounts":enabled,"active_requests":rt.active.load(Ordering::Acquire),
                 "storage":{"persistent":true},"catalog_synchronized":!catalog_dirty,"capabilities":{"api_key":true,"oauth_import":false,"oauth_device":true,"official_balance":true,"official_analytics":false,
                     "per_account_allowlist":false,"model_validation":false,"cli_discovery_configured":rt.config.droid_cli_path.is_some()},

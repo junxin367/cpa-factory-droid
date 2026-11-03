@@ -115,12 +115,17 @@ fn session_hint(headers: &Value, metadata: &Value, payload: &Value) -> Option<St
             })
         });
     if root.is_some() || thread.is_some() {
+        // An explicit thread identifies the actual conversation. Agent names can
+        // be reused by separate threads under the same root session.
+        if let Some(thread) = thread {
+            return Some(thread.into());
+        }
         let agent = bounded(&turn["agent_name"])
             .map(|agent| agent.trim_start_matches('/').trim_start_matches("root/"))
             .filter(|agent| !["", "root", "main"].contains(agent));
         return Some(match (root, agent) {
             (Some(root), Some(agent)) => json!(["codex-agent", root, agent]).to_string(),
-            _ => thread.or(root)?.into(),
+            _ => root?.into(),
         });
     }
     for name in [
@@ -178,10 +183,20 @@ pub fn identity(
     metadata: &Value,
     payload: &Value,
 ) -> Result<Identity> {
+    identify(&rt.wire_ids, cred, headers, metadata, payload)
+}
+
+fn identify(
+    ids: &Identifiers,
+    cred: &Value,
+    headers: &Value,
+    metadata: &Value,
+    payload: &Value,
+) -> Result<Identity> {
     let caller = caller_hint(headers, metadata).unwrap_or("");
     let account = cred["account_id"].as_str().unwrap_or("");
     let hint = session_hint(headers, metadata, payload);
-    let scoped = |kind, value: &str| rt.wire_ids.scoped(kind, account, caller, value);
+    let scoped = |kind, value: &str| ids.scoped(kind, account, caller, value);
     let session = hint
         .as_deref()
         .map(|id| scoped("conversation", id))
@@ -410,4 +425,115 @@ pub fn protocol_headers(headers: &mut Value, incoming: &Value, model: &Model) ->
     }
     crate::catalog::apply_required_headers(headers, model);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids() -> Identifiers {
+        Identifiers::new("afac50e3-b106-4935-a576-7cd096c35de4").unwrap()
+    }
+
+    #[test]
+    fn explicit_codex_threads_override_reused_agent_names() {
+        let request = |thread: &str, agent: &str| {
+            json!({"Session-Id":["root"],"Thread-Id":[thread],
+                "X-Codex-Turn-Metadata":[json!({"agent_name":agent}).to_string()]})
+        };
+        let hint = |headers: Value| session_hint(&headers, &json!({}), &json!({})).unwrap();
+        assert_ne!(
+            hint(request("first", "worker")),
+            hint(request("second", "worker"))
+        );
+        assert_eq!(
+            hint(request("first", "worker")),
+            hint(request("first", "renamed"))
+        );
+        assert_eq!(
+            hint(request("first", "/root/worker")),
+            hint(request("first", "root"))
+        );
+        let metadata = json!({"X-Codex-Turn-Metadata":[
+            json!({"session_id":"root","thread_id":"first","agent_name":"worker"}).to_string()]});
+        assert_eq!(hint(metadata), hint(request("first", "worker")));
+    }
+
+    #[test]
+    fn named_agents_without_threads_remain_stable_and_separate() {
+        let hint = |agent: &str| {
+            session_hint(
+                &json!({"Session-Id":["root"],
+            "X-Codex-Turn-Metadata":[json!({"agent_name":agent}).to_string()]}),
+                &json!({}),
+                &json!({}),
+            )
+        };
+        assert_eq!(hint("worker"), hint("/root/worker"));
+        assert_ne!(hint("worker"), hint("reviewer"));
+    }
+
+    #[test]
+    fn conversation_cache_and_safety_have_independent_scopes() {
+        let credential = json!({"account_id":"account"});
+        let metadata = json!({"caller_scope":"caller"});
+        let make = |conversation: &str, cache: &str| {
+            identify(&ids(), &credential, &json!({}),
+            &metadata, &json!({"conversation":conversation,"prompt_cache_key":cache,"safety_identifier":"user"})).unwrap()
+        };
+        let a = make("conversation-a", "shared");
+        let b = make("conversation-b", "shared");
+        let c = make("conversation-a", "different");
+        assert_ne!(a.session, b.session);
+        assert_eq!(a.session, c.session);
+        assert_eq!(a.cache, b.cache);
+        assert_ne!(a.cache, c.cache);
+        assert_eq!(a.safety, b.safety);
+        assert_ne!(a.safety, a.cache);
+        assert_ne!(a.message, make("conversation-a", "shared").message);
+        assert_eq!(a.session, make("conversation-a", "shared").session);
+    }
+
+    #[test]
+    fn shared_host_hints_do_not_create_a_conversation() {
+        let metadata = json!({"caller_scope":"caller","canonical_session_id":"pck:shared",
+            "derived_session_id":"shared"});
+        let payload = json!({"prompt_cache_key":"shared","metadata":{"user_id":"shared-user"}});
+        let a = identify(
+            &ids(),
+            &json!({"account_id":"a"}),
+            &json!({}),
+            &metadata,
+            &payload,
+        )
+        .unwrap();
+        let b = identify(
+            &ids(),
+            &json!({"account_id":"a"}),
+            &json!({}),
+            &metadata,
+            &payload,
+        )
+        .unwrap();
+        assert_ne!(a.session, b.session);
+        assert_eq!(a.cache, b.cache);
+        let other = identify(
+            &ids(),
+            &json!({"account_id":"b"}),
+            &json!({}),
+            &metadata,
+            &payload,
+        )
+        .unwrap();
+        assert_ne!(a.cache, other.cache);
+        let caller = identify(
+            &ids(),
+            &json!({"account_id":"a"}),
+            &json!({}),
+            &json!({"caller_scope":"other"}),
+            &payload,
+        )
+        .unwrap();
+        assert_ne!(a.cache, caller.cache);
+    }
 }

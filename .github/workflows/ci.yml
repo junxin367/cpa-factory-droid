@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  PYTHONUTF8: "1"
   CPA_PLUGIN_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
 
 jobs:
@@ -65,9 +66,25 @@ jobs:
       - name: 验证 Linux GLIBC 兼容基线
         if: matrix.goos == 'linux'
         run: node scripts/check-linux-runtime.mjs target/${{ matrix.target }}/release/libcpa_factory_droid.so 2.35
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: 真实 CPA 宿主集成验证
+        shell: pwsh
+        run: |
+          $library = if ('${{ matrix.goos }}' -eq 'windows') { 'cpa_factory_droid.dll' } else { 'libcpa_factory_droid.so' }
+          python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --report "temp/cpa-validation-${{ matrix.platform }}.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: factory-droid-${{ matrix.platform }}
           path: release/factory-droid_*_${{ matrix.goos }}_amd64.zip
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: validation-${{ matrix.platform }}
+          path: temp/cpa-validation-*.json
+          if-no-files-found: warn
+          retention-days: 14

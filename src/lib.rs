@@ -90,7 +90,7 @@ pub struct Runtime {
     workers: Mutex<Vec<JoinHandle<()>>>,
     downstreams: Mutex<HashSet<String>>,
     approvals: Mutex<guard::Approvals>,
-    catalog_observed: Mutex<HashMap<String, String>>,
+    catalog_observed: Mutex<HashMap<String, management::CatalogObservation>>,
     catalog_dirty: AtomicBool,
     catalog_error: Mutex<Option<String>>,
     management_lock: Mutex<()>,
@@ -569,12 +569,17 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
                 .map(Model::host_json)
                 .collect();
             drop(store);
-            if let Some(revision) = auth["factory_catalog_revision"].as_str() {
-                rt.catalog_observed
-                    .lock()
-                    .map_err(|_| Fault::internal())?
-                    .insert(account.into(), revision.into());
-            }
+            let offered = models
+                .iter()
+                .filter_map(|model| model["ID"].as_str().map(str::to_string))
+                .collect();
+            rt.catalog_observed
+                .lock()
+                .map_err(|_| Fault::internal())?
+                .insert(
+                    account.into(),
+                    management::CatalogObservation::new(data, &auth, offered),
+                );
             Ok(json!({"Provider":PROVIDER,"Models":models}))
         }
         "management.register" => Ok(management::registration(data)),

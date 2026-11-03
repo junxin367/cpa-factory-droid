@@ -3,16 +3,23 @@ name: 构建与发布
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的发布标签，例如 v0.1.1"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
+  PYTHONUTF8: "1"
   CPA_PLUGIN_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
 
 jobs:
@@ -26,6 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
@@ -34,7 +42,7 @@ jobs:
       - name: 校验标签、版本和注册表
         id: metadata
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           node scripts/release.mjs registry
           node scripts/release.mjs metadata
@@ -57,6 +65,16 @@ jobs:
             target: x86_64-unknown-linux-gnu
             goos: linux
             goarch: amd64
+          - platform: darwin-amd64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            goos: darwin
+            goarch: amd64
+          - platform: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            goos: darwin
+            goarch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,11 +104,31 @@ jobs:
       - name: 验证 Linux GLIBC 兼容基线
         if: matrix.goos == 'linux'
         run: node scripts/check-linux-runtime.mjs target/${{ matrix.target }}/release/libcpa_factory_droid.so 2.35
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: 真实 CPA 宿主集成验证
+        shell: pwsh
+        run: |
+          $library = switch ('${{ matrix.goos }}') {
+            'windows' { 'cpa_factory_droid.dll' }
+            'linux' { 'libcpa_factory_droid.so' }
+            'darwin' { 'libcpa_factory_droid.dylib' }
+          }
+          python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --report "temp/cpa-validation-${{ matrix.platform }}.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: factory-droid-${{ matrix.platform }}
           path: release/factory-droid_${{ needs.metadata.outputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
           if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: validation-${{ matrix.platform }}
+          path: temp/cpa-validation-*.json
+          if-no-files-found: warn
           retention-days: 14
 
   publish:
@@ -131,10 +169,11 @@ jobs:
           set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" artifacts/* --clobber
+            gh release edit "$RELEASE_TAG" --notes-file temp/release-notes.md
           else
             flags=()
             if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-            gh release create "$RELEASE_TAG" artifacts/* --verify-tag \
+            gh release create "$RELEASE_TAG" artifacts/* --verify-tag --draft \
               --title "$RELEASE_TAG" --notes-file temp/release-notes.md "${flags[@]}"
           fi
       - name: 生成 CPA 更新清单
@@ -144,3 +183,12 @@ jobs:
           gh release view "$RELEASE_TAG" --json assets,body,tagName,url > temp/release.json
           node scripts/release.mjs manifest temp/release.json artifacts/latest.json
           gh release upload "$RELEASE_TAG" artifacts/latest.json --clobber
+      - name: 核对完整发布资产并公开版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json assets,body,tagName,url > temp/final-release.json
+          node scripts/release.mjs manifest temp/final-release.json temp/verified-latest.json
+          cmp artifacts/latest.json temp/verified-latest.json
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fx latest.json
+          gh release edit "$RELEASE_TAG" --draft=false

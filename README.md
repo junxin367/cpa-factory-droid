@@ -47,14 +47,22 @@ CPA 官方管理端已支持通用插件额度。CPA-Manager-Plus v1.14.10 原�
 ## 运行要求
 
 - CPA v8.0.52，C ABI 1 / RPC schema 10，需要带 CGO 原生插件支持的构建。
-- Windows x64 需要 Microsoft Visual C++ v14 Redistributable；Linux x64 构建基线为 Ubuntu 22.04 / GLIBC 2.35。
+- Windows x64 需要 Microsoft Visual C++ v14 Redistributable；Linux x64 构建基线为 Ubuntu 22.04 / GLIBC 2.35；另提供 macOS Intel 和 Apple Silicon 原生动态库。
 - 可登录的 Factory 账号或 API Key（`fk-` 开头），以及可访问 Factory 的 CPA 出站网络；OAuth 还需要访问 `api.workos.com`。
 - 官方 Droid CLI 是独立依赖，不随插件分发。插件只用 CLI 查询模型目录，不以 CLI 执行推理。
 
-## 本地安装（Windows x64 已实装验证）
+## 安装
 
-1. 使用本地 `release/` 中对应系统的 ZIP，或按下文从源码构建。Linux x64 使用相应产物，运行要求见上节。
-2. 解压，将 ZIP 根目录的 `factory-droid.dll`（Windows）或 `factory-droid.so`（Linux）放入 CPA 的 `plugins` 目录。不要直接复制 Cargo 产物的 crate 文件名。
+在 CPA 插件商店中添加本仓库的注册表源：
+
+```text
+https://raw.githubusercontent.com/junxin367/cpa-factory-droid/main/registry.json
+```
+
+也可从 [GitHub Releases](https://github.com/junxin367/cpa-factory-droid/releases) 下载对应平台的 ZIP，并按下列步骤手动安装。`checksums.txt` 校验 ZIP，包内 `SHA256SUMS.txt` 校验动态库，`latest.json` 提供 CPA 更新清单。
+
+1. 使用对应系统及架构的 ZIP，或按下文从源码构建。
+2. 解压，将 ZIP 根目录的 `factory-droid.dll`（Windows）、`factory-droid.so`（Linux）或 `factory-droid.dylib`（macOS）放入 CPA 的 `plugins` 目录。不要直接复制 Cargo 产物的 crate 文件名。
 3. 在 CPA 配置中合并下列片段，保留已有插件配置：
 
    ```yaml
@@ -167,7 +175,7 @@ Content-Type: application/json
 
 旧插件账本和价格字段保留用于兼容读取，不自动删除或转换成 CPA 历史。卸载前可在 CPA 原生凭证页移除账号。一个插件数据目录只供一个 CPA 进程使用。
 
-当前工作区变化及本地更新尚未发布为新的 GitHub Release。验证范围见 [验证记录](docs/validation.md)。
+版本变化见 [v0.1.1 发布说明](docs/releases/v0.1.1.md)，可复现检查及真实账号验证边界见 [当前验证记录](docs/release-validation.md)。
 
 ## 开发与构建
 
@@ -182,6 +190,7 @@ node --check scripts/release.mjs
 node scripts/release.mjs registry
 cargo test --locked
 ./scripts/build.ps1 -Target x86_64-pc-windows-msvc -ReleaseAssets
+python -B scripts/verify-cpa.py --library target/x86_64-pc-windows-msvc/release/cpa_factory_droid.dll
 ```
 
 Linux x64 在相应系统运行：
@@ -192,7 +201,9 @@ Linux x64 在相应系统运行：
 
 安装包写入 `release/`。构建脚本会从 Cargo 元数据定位 `cpa_factory_droid` 动态库，重命名为 CPA 插件文件名后打包，并检查根目录动态库、文档链接和校验和。ZIP 外的同名 `.build.json` 记录源码指纹、构建环境及产物信息，`.sha256` / `checksums.txt` 提供 ZIP 校验；ZIP 内 `SHA256SUMS.txt` 校验动态库。指定 `-Profile debug` 可生成带 `_debug` 后缀的本地包；它不能与 `-ReleaseAssets` 同时使用。
 
-CI 在 Windows x64 / Linux x64 检查格式、测试和打包，并校验 Linux 产物的 GLIBC 导入基线。本地 Linux 构建也可运行 `node scripts/check-linux-runtime.mjs target/x86_64-unknown-linux-gnu/release/libcpa_factory_droid.so 2.35`，需要系统安装 `readelf`。发布工作流仅响应 `v*` 标签，并校验标签、Cargo 版本和 `registry.json` 一致；它还会生成 ZIP 校验和、发布说明和 `latest.json`。推送标签会触发发布，因此本地构建无需创建或推送标签。
+常规 CI 检查 Windows x64 / Linux x64；发布工作流构建 Windows x64、Linux x64、macOS Intel、macOS Apple Silicon 四个平台。每个平台均测试 Rust、打包并通过固定 CPA v8.0.52 的真实宿主执行模拟上游回归；宿主下载包验证固定 SHA256，不读取本机真实凭据。Linux 另校验 GLIBC 2.35 基线。
+
+发布由 `v*` 标签触发，也可手动选择已有标签重试；标签、Cargo 和注册表版本必须一致。全部平台完成后，工作流先创建草稿，上传四个 ZIP、`checksums.txt` 和 `latest.json`，核对完整性后公开。macOS runner 使用当前可用的 `macos-15-intel` 和 `macos-15`。本地构建不需要创建或推送标签。
 
 实现结构与限制见 [架构说明](docs/architecture.md)，选型依据见 [调研记录](docs/research.md)。CPAMP 的历史统计、独立价格表和认证差异见 [Manager Plus 兼容说明](docs/manager-plus.md)。
 

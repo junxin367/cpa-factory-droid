@@ -4,9 +4,9 @@
     {
       "id": "factory-droid",
       "name": "Factory Droid",
-      "description": "将 Factory 账号按原生协议接入 CLIProxyAPI，按账号验证并发布模型，管理官方额度、用量和本地费用估算。",
+      "description": "通过 OAuth 或 API Key 接入 Factory，自动同步原生模型与官方额度，复用 CPA 凭证管理和用量统计。",
       "author": "junxin367",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "repository": "https://github.com/junxin367/cpa-factory-droid",
       "homepage": "https://github.com/junxin367/cpa-factory-droid",
       "license": "MIT",
