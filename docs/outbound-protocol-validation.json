@@ -1,0 +1,265 @@
+{
+  "date": "2026-11-04",
+  "existing_unit_tests": 6,
+  "temporary_unit_tests": 8,
+  "native_cpa": {
+    "tested_at": "2026-11-03T16:51:39.983072+00:00",
+    "checks": [
+      {
+        "name": "模拟凭证可通过 CPA 添加",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "身份查询与官方 fetch 请求头一致",
+        "passed": true
+      },
+      {
+        "name": "anthropic JSON 原生请求成功",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "anthropic JSON CLI 身份和路由对齐",
+        "passed": true
+      },
+      {
+        "name": "anthropic JSON 代理头和下游密钥不外发",
+        "passed": true
+      },
+      {
+        "name": "anthropic JSON 会话消息与追踪独立生成",
+        "passed": true
+      },
+      {
+        "name": "anthropic JSON 外层无反代标识",
+        "passed": true
+      },
+      {
+        "name": "anthropic JSON 会话缓存字段已匿名化",
+        "passed": true
+      },
+      {
+        "name": "anthropic SSE 原生请求成功",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "anthropic SSE CLI 身份和路由对齐",
+        "passed": true
+      },
+      {
+        "name": "anthropic SSE 代理头和下游密钥不外发",
+        "passed": true
+      },
+      {
+        "name": "anthropic SSE 会话消息与追踪独立生成",
+        "passed": true
+      },
+      {
+        "name": "anthropic SSE 外层无反代标识",
+        "passed": true
+      },
+      {
+        "name": "anthropic SSE 会话缓存字段已匿名化",
+        "passed": true
+      },
+      {
+        "name": "responses JSON 原生请求成功",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "responses JSON CLI 身份和路由对齐",
+        "passed": true
+      },
+      {
+        "name": "responses JSON 代理头和下游密钥不外发",
+        "passed": true
+      },
+      {
+        "name": "responses JSON 会话消息与追踪独立生成",
+        "passed": true
+      },
+      {
+        "name": "responses JSON 外层无反代标识",
+        "passed": true
+      },
+      {
+        "name": "responses JSON 会话缓存字段已匿名化",
+        "passed": true
+      },
+      {
+        "name": "responses SSE 原生请求成功",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "responses SSE CLI 身份和路由对齐",
+        "passed": true
+      },
+      {
+        "name": "responses SSE 代理头和下游密钥不外发",
+        "passed": true
+      },
+      {
+        "name": "responses SSE 会话消息与追踪独立生成",
+        "passed": true
+      },
+      {
+        "name": "responses SSE 外层无反代标识",
+        "passed": true
+      },
+      {
+        "name": "responses SSE 会话缓存字段已匿名化",
+        "passed": true
+      },
+      {
+        "name": "chat JSON 原生请求成功",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "chat JSON CLI 身份和路由对齐",
+        "passed": true
+      },
+      {
+        "name": "chat JSON 代理头和下游密钥不外发",
+        "passed": true
+      },
+      {
+        "name": "chat JSON 会话消息与追踪独立生成",
+        "passed": true
+      },
+      {
+        "name": "chat JSON 外层无反代标识",
+        "passed": true
+      },
+      {
+        "name": "chat JSON 会话缓存字段已匿名化",
+        "passed": true
+      },
+      {
+        "name": "chat SSE 原生请求成功",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "chat SSE CLI 身份和路由对齐",
+        "passed": true
+      },
+      {
+        "name": "chat SSE 代理头和下游密钥不外发",
+        "passed": true
+      },
+      {
+        "name": "chat SSE 会话消息与追踪独立生成",
+        "passed": true
+      },
+      {
+        "name": "chat SSE 外层无反代标识",
+        "passed": true
+      },
+      {
+        "name": "chat SSE 会话缓存字段已匿名化",
+        "passed": true
+      },
+      {
+        "name": "同一会话稳定且不同会话隔离",
+        "passed": true
+      },
+      {
+        "name": "不同调用方的同名会话隔离",
+        "passed": true
+      },
+      {
+        "name": "每次请求的消息与追踪标识不同",
+        "passed": true
+      },
+      {
+        "name": "仅 X-Api-Key 鉴权也按调用方隔离",
+        "passed": true
+      },
+      {
+        "name": "业务文本、工具签名与历史不被清理",
+        "passed": true
+      },
+      {
+        "name": "Responses 原生续接与加密内容保留",
+        "passed": true
+      },
+      {
+        "name": "anthropic 拒绝借协议头传递代理标识",
+        "passed": true,
+        "http": 400
+      },
+      {
+        "name": "anthropic 拒绝借协议头传递代理标识",
+        "passed": true,
+        "http": 400
+      },
+      {
+        "name": "responses 拒绝借协议头传递代理标识",
+        "passed": true,
+        "http": 400
+      },
+      {
+        "name": "合法原生 beta 请求头保留",
+        "passed": true
+      },
+      {
+        "name": "额度读取使用当前 CLI 的 API 请求头",
+        "passed": true
+      },
+      {
+        "name": "OAuth 原生凭证流程仍可用",
+        "passed": true
+      },
+      {
+        "name": "OAuth 出站包含明确客户端且无 CPA 默认头",
+        "passed": true
+      },
+      {
+        "name": "通过 CPA 停用第一张模拟凭证",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "OAuth 推理只发送自身令牌和 Factory 组织",
+        "passed": true
+      },
+      {
+        "name": "同名会话在不同上游凭证间隔离",
+        "passed": true
+      },
+      {
+        "name": "CPA 原生统计继续接收请求",
+        "passed": true,
+        "records": 19
+      },
+      {
+        "name": "匿名映射不写入插件持久状态",
+        "passed": true
+      }
+    ],
+    "dll_sha256": "300217360363677bc9a17691a495d1a1b82aba97a1ead1693d0c9a46f5ca7b52",
+    "llm_requests": 16
+  },
+  "real_inference": false,
+  "real_oauth_login": false,
+  "local_deployment": {
+    "at": "2026-11-03T16:56:48.490678+00:00",
+    "target": "http://127.0.0.1:60892",
+    "pid": 72072,
+    "installed_sha256": "300217360363677bc9a17691a495d1a1b82aba97a1ead1693d0c9a46f5ca7b52",
+    "tested_sha256": "300217360363677bc9a17691a495d1a1b82aba97a1ead1693d0c9a46f5ca7b52",
+    "health": "ready",
+    "models": 53,
+    "models_unchanged": true,
+    "uuid_models": 0,
+    "real_quota_http": 200,
+    "quota_groups": 2,
+    "real_inference": false,
+    "real_oauth_login": false
+  }
+}

@@ -18,15 +18,12 @@ pub const RESOURCE: &str = "/v0/resource/plugins/factory-droid";
 pub fn registration(data: &Value) -> Value {
     let base = data["BasePath"].as_str().unwrap_or("/v0/management");
     let routes:Vec<_>=[
-        ("GET","status"),("GET","accounts"),("POST","accounts"),("PATCH","accounts"),("DELETE","accounts"),
-        ("POST","accounts/refresh"),("GET","settings"),("PUT","settings"),("GET","models"),("GET","usage"),
-        ("GET","accounts/models"),("POST","accounts/discovery"),("POST","accounts/models/verify"),
-        ("DELETE","accounts/models/allow"),("POST","models/reconcile"),
-        ("POST","drafts"),("GET","drafts"),("DELETE","drafts"),("POST","drafts/discovery"),
-        ("PUT","drafts/models"),("POST","drafts/models/test"),("POST","drafts/commit"),
+        ("GET","status"),("GET","accounts"),("POST","accounts"),
+        ("POST","accounts/refresh"),
+        ("POST","models/reconcile"),
     ].into_iter().map(|(method,path)|json!({"Method":method,"Path":format!("{base}/plugins/{PROVIDER}/{path}")})).collect();
     json!({"routes":routes,"resources":[
-        {"Path":"/index.html","Menu":"Factory Droid","Description":"Factory 授权、官方额度与本地用量估算"},
+        {"Path":"/index.html","Menu":"Factory Droid","Description":"添加 Factory 凭据并自动同步模型"},
         {"Path":"/app.js"},{"Path":"/style.css"}
     ]})
 }
@@ -127,6 +124,7 @@ pub fn sync_accounts(rt: &Runtime) -> Result<()> {
         });
         if changed {
             factory::upsert_account(rt, cred, name, false)?;
+            access::restore_catalog(rt, cred)?;
             rt.catalog_dirty.store(true, Ordering::Release);
         }
     }
@@ -209,13 +207,11 @@ pub fn observe_publication(rt: &Runtime) -> Result<()> {
         let desired: BTreeSet<_> = store
             .effective_models(&account.id)
             .iter()
-            .flat_map(|m| [m.id.clone(), account.pinned_id(m)])
+            .map(|m| m.id.clone())
             .collect();
         store.published_models.get(&account.id) != Some(&desired)
     });
-    if differs {
-        rt.catalog_dirty.store(true, Ordering::Release);
-    }
+    rt.catalog_dirty.store(differs, Ordering::Release);
     Ok(())
 }
 fn account_view(rt: &Runtime, id: &str) -> Result<Value> {
@@ -373,11 +369,10 @@ fn reconcile_accounts(rt: &Runtime) -> Result<()> {
                 .is_some_and(|a| a.enabled && !a.deleted);
         let models = if enabled {
             let store = rt.lock()?;
-            let account = store.accounts.get(&id).ok_or_else(Fault::internal)?;
             store
                 .effective_models(&id)
                 .iter()
-                .flat_map(|m| [m.id.clone(), account.pinned_id(m)])
+                .map(|m| m.id.clone())
                 .collect()
         } else {
             BTreeSet::new()
@@ -397,7 +392,7 @@ fn reconcile_accounts(rt: &Runtime) -> Result<()> {
         let desired: BTreeSet<_> = store
             .effective_models(&account.id)
             .iter()
-            .flat_map(|m| [m.id.clone(), account.pinned_id(m)])
+            .map(|m| m.id.clone())
             .collect();
         store.published_models.get(&account.id) != Some(&desired)
     }) {
@@ -457,9 +452,9 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
                 "health":if store.health_error.is_some()||catalog_dirty{"degraded"}else{"ready"},
                 "message":store.health_error.clone().or(catalog_error).or_else(||catalog_dirty.then(||"模型目录尚未同步完成，请重新保存设置并检查宿主注册状态".into())),
                 "account_count":count,"enabled_accounts":enabled,"active_requests":rt.active.load(Ordering::Acquire),
-                "storage":{"persistent":true},"catalog_synchronized":!catalog_dirty,"capabilities":{"api_key":true,"oauth_import":false,"oauth_device":false,"official_balance":true,"official_analytics":true,
-                    "per_account_allowlist":true,"model_validation":true,"cli_discovery_configured":rt.config.droid_cli_path.is_some()},
-                "usage":store.usage(None),"settings":store.settings}),
+                "storage":{"persistent":true},"catalog_synchronized":!catalog_dirty,"capabilities":{"api_key":true,"oauth_import":false,"oauth_device":true,"official_balance":true,"official_analytics":false,
+                    "per_account_allowlist":false,"model_validation":false,"cli_discovery_configured":rt.config.droid_cli_path.is_some()},
+                "statistics_provider":"cpa","automatic_models":true}),
             )
         }
         ("GET", "/accounts") => {
@@ -495,21 +490,12 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
             let mut cred =
                 factory::new_credential(key, label, data["enabled"].as_bool().unwrap_or(true));
             factory::whoami(rt, &mut cred, callback)?;
+            access::refresh_catalog(rt, &mut cred)?;
             let id = cred["account_id"].as_str().unwrap_or("").to_string();
             let name = format!("factory-droid-{id}.json");
             factory::save_account(rt, &cred, &name)?;
             factory::upsert_account(rt, &cred, &name, true)?;
-            // Authorization succeeds independently of optional Enterprise Analytics access.
-            let (limits, usage) = factory::read_official(rt, &cred, callback);
-            {
-                let mut store = rt.lock()?;
-                store.sample_quota(&id, &limits);
-                if let Some(a) = store.accounts.get_mut(&id) {
-                    a.official_limits = limits;
-                    a.official_usage = usage;
-                }
-                store.persist()?;
-            }
+            access::restore_catalog(rt, &cred)?;
             reconcile(rt)?;
             account_view(rt, &id)
         }
@@ -634,18 +620,10 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
                 let _ = reconcile(rt);
                 return Err(error);
             }
+            access::refresh_catalog(rt, &mut cred)?;
             factory::save_account(rt, &cred, &name)?;
             factory::upsert_account(rt, &cred, &name, true)?;
-            let (limits, usage) = factory::read_official(rt, &cred, callback);
-            {
-                let mut store = rt.lock()?;
-                store.sample_quota(id, &limits);
-                if let Some(a) = store.accounts.get_mut(id) {
-                    a.official_limits = limits;
-                    a.official_usage = usage;
-                }
-                store.persist()?;
-            }
+            access::restore_catalog(rt, &cred)?;
             reconcile(rt)?;
             account_view(rt, id)
         }

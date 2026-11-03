@@ -1,0 +1,118 @@
+{
+  "date": "2026-11-04",
+  "cli_version": "1.2.0",
+  "cli_sha256": "b075e952982d0b3c731e875dfd4e95c835c4d1a8d9e46c791636ebd8116fd754",
+  "method": "官方 CLI，隔离 HOME、模拟凭证、本机 Factory API；未使用真实账号推理",
+  "samples": [
+    {
+      "protocol": "anthropic-current",
+      "model": "claude-opus-5-5",
+      "exit_code": 0,
+      "path": "/api/llm/a/v1/messages",
+      "headers": {
+        "Accept": "application/json",
+        "Authorization": "Bearer <credential>",
+        "Content-Type": "application/json",
+        "User-Agent": "factory-cli/1.2.0",
+        "anthropic-beta": "server-side-fallback-2026-06-01,fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14",
+        "anthropic-version": "2023-06-01",
+        "traceparent": "00-<trace-id>-<span-id>-01",
+        "x-api-provider": "anthropic",
+        "x-assistant-message-id": "<uuid-v4>",
+        "x-client-version": "1.2.0",
+        "x-factory-client": "cli",
+        "x-provider-routing-source": "registry_default",
+        "x-session-id": "<uuid-v4>",
+        "Connection": "keep-alive",
+        "Accept-Encoding": "gzip, deflate, br, zstd"
+      },
+      "payload_fields": [
+        "model",
+        "max_tokens",
+        "messages",
+        "tools",
+        "system",
+        "thinking",
+        "output_config",
+        "fallbacks",
+        "stream"
+      ],
+      "cache_key_matches_session": null,
+      "safety_identifier_matches_session": null
+    },
+    {
+      "protocol": "responses-current",
+      "model": "gpt-5.4",
+      "exit_code": 0,
+      "path": "/api/llm/o/v1/responses",
+      "headers": {
+        "Accept": "application/json",
+        "Authorization": "Bearer <credential>",
+        "Content-Type": "application/json",
+        "User-Agent": "factory-cli/1.2.0",
+        "openai-platform": "org-bHuLtG1fGmYk5YaOihAAXFBw",
+        "traceparent": "00-<trace-id>-<span-id>-01",
+        "x-api-provider": "openai",
+        "x-assistant-message-id": "<uuid-v4>",
+        "x-client-version": "1.2.0",
+        "x-factory-client": "cli",
+        "x-provider-routing-source": "registry_default",
+        "x-session-id": "<uuid-v4>",
+        "Connection": "keep-alive",
+        "Accept-Encoding": "gzip, deflate, br, zstd"
+      },
+      "payload_fields": [
+        "model",
+        "input",
+        "store",
+        "tools",
+        "instructions",
+        "stream",
+        "tool_choice",
+        "parallel_tool_calls",
+        "include",
+        "reasoning",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "text",
+        "safety_identifier"
+      ],
+      "cache_key_matches_session": true,
+      "safety_identifier_matches_session": true
+    },
+    {
+      "protocol": "chat-current",
+      "model": "glm-5.3",
+      "exit_code": 0,
+      "path": "/api/llm/o/v1/chat/completions",
+      "headers": {
+        "Accept": "application/json",
+        "Authorization": "Bearer <credential>",
+        "Content-Type": "application/json",
+        "User-Agent": "factory-cli/1.2.0",
+        "traceparent": "00-<trace-id>-<span-id>-01",
+        "x-api-provider": "fireworks",
+        "x-assistant-message-id": "<uuid-v4>",
+        "x-client-version": "1.2.0",
+        "x-factory-client": "cli",
+        "x-provider-routing-source": "registry_default",
+        "x-session-id": "<uuid-v4>",
+        "Connection": "keep-alive",
+        "Accept-Encoding": "gzip, deflate, br, zstd"
+      },
+      "payload_fields": [
+        "messages",
+        "model",
+        "tools",
+        "stream",
+        "stream_options",
+        "max_tokens",
+        "temperature",
+        "reasoning_effort",
+        "reasoning_history"
+      ],
+      "cache_key_matches_session": null,
+      "safety_identifier_matches_session": null
+    }
+  ]
+}

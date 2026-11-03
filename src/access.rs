@@ -98,6 +98,7 @@ pub fn fingerprint(value: &Value) -> String {
 pub fn credential_fingerprint(credential: &Value) -> String {
     fingerprint(
         &json!({"type":credential["type"],"id":credential["account_id"],"key":credential["api_key"],"user":credential["user_id"],
+        "auth_method":credential["auth_method"],"oauth_user":credential["oauth_user_id"],
         "org":credential["org_id"],"region":credential["region"],"host":credential["prem_base_host"],
         "principal":credential["principal_kind"],"inference_region":credential["inference_region"]}),
     )
@@ -158,27 +159,21 @@ pub fn known_blocks(account: &Account, model: &Model) -> Vec<String> {
         .collect()
 }
 
-fn register_discovered_models(store: &mut Store, candidates: &[Value]) -> Result<()> {
+pub fn register_discovered_models(store: &mut Store, candidates: &[Value]) -> Result<()> {
     let previous = store.settings.models.clone();
     for candidate in candidates {
-        if store.settings.models.len() >= 100 || !candidate_blocks(candidate).is_empty() {
+        if store.settings.models.len() >= 1024 || !candidate_blocks(candidate).is_empty() {
             continue;
         }
         let Some(model) = crate::catalog::model(candidate) else {
             continue;
         };
-        // Keep explicit routes, disable switches, prices and user-defined aliases intact.
+        // Native CPA credentials share one public ID per upstream model.
         if store
             .settings
             .models
             .iter()
-            .any(|existing| existing.upstream_id == model.upstream_id || existing.id == model.id)
-            || store.accounts.values().any(|account| {
-                account
-                    .model_overrides
-                    .values()
-                    .any(|overrides| overrides.alias.as_deref() == Some(model.upstream_id.as_str()))
-            })
+            .any(|existing| existing.id == model.id)
         {
             continue;
         }
@@ -200,40 +195,20 @@ pub fn blocked_reasons(account: &Account, model: &Model) -> Vec<String> {
     if !account.enabled {
         reasons.push("account_disabled".into());
     }
-    if !account.identity_verified {
-        reasons.push("identity_not_verified".into());
-    }
     if !model.enabled {
         reasons.push("global_disabled".into());
     }
-    match account.model_access.get(&model.id) {
-        None => reasons.push("basic_call_not_verified".into()),
-        Some(access) => {
-            if !access.allowed {
-                reasons.push("not_allowed".into());
-            }
-            if access.verification_status != "basic_call_verified" {
-                reasons.push("basic_call_not_verified".into());
-            }
-            if access.credential_fingerprint != account.credential_fingerprint
-                || access.credential_generation != account.credential_generation
-            {
-                reasons.push("credential_changed".into());
-            }
-            if access.route_fingerprint != route_fingerprint(model) {
-                reasons.push("route_changed".into());
-            }
-            if access.selection_source.as_deref() == Some("official_droid_cli")
-                && account.discovery.status == "candidate_catalog"
-                && !account
-                    .discovery
-                    .candidates
-                    .iter()
-                    .any(|c| candidate_id(c) == Some(&model.upstream_id))
-            {
-                reasons.push("candidate_missing".into());
-            }
-        }
+    if model.id != format!("factory/{}", model.upstream_id) {
+        reasons.push("non_canonical_model".into());
+    }
+    if !account.discovery.candidates.is_empty()
+        && !account.discovery.candidates.iter().any(|candidate| {
+            candidate_id(candidate) == Some(&model.upstream_id)
+                && candidate_blocks(candidate).is_empty()
+                && crate::catalog::route(candidate).is_some()
+        })
+    {
+        reasons.push("candidate_missing".into());
     }
     reasons.sort();
     reasons.dedup();
@@ -257,13 +232,10 @@ impl Store {
             .find(|a| crate::state::auth_id_matches(auth_id, &a.id, &a.auth_file))
     }
     pub fn ensure_model_allowed(&self, account_id: &str, model: &Model) -> Result<()> {
-        let account = self.accounts.get(account_id).ok_or_else(|| {
-            Fault::new(
-                403,
-                "model_not_allowed",
-                "Factory账号不存在或尚未完成模型验证",
-            )
-        })?;
+        let account = self
+            .accounts
+            .get(account_id)
+            .ok_or_else(|| Fault::new(403, "model_not_allowed", "Factory 凭据尚未加载"))?;
         if !self.effective_models(account_id).iter().any(|m| {
             if m.id != model.id && model.id != account.pinned_id(m) {
                 return false;
@@ -275,7 +247,7 @@ impl Store {
             return Err(Fault::new(
                 403,
                 "model_not_allowed",
-                "该账号尚未允许并通过此模型的当前路由基础验证，请在插件模型页验证并允许",
+                "当前凭据的 Factory 模型目录不包含此路由",
             ));
         }
         Ok(())
@@ -569,6 +541,108 @@ pub fn cancel_discovery(rt: &Runtime, id: &str) {
             token.store(true, Ordering::Release);
         }
     }
+}
+
+/// Fetch metadata only. Calling a model remains CPA's normal request path.
+pub fn refresh_catalog(rt: &Arc<Runtime>, cred: &mut Value) -> Result<()> {
+    let Some(executable) = rt.config.droid_cli_path.clone() else {
+        cred["factory_catalog_source"] = json!("bundled_registry");
+        cred["factory_catalog_checked_at"] = json!(now());
+        return Ok(());
+    };
+    let id = cred["account_id"].as_str().ok_or_else(Fault::internal)?;
+    let run = DiscoveryRun::begin(rt, id)?;
+    let work_root = rt
+        .lock()?
+        .path
+        .parent()
+        .ok_or_else(Fault::internal)?
+        .join("discovery-runs");
+    let snapshot = discovery::discover(
+        discovery::Options {
+            executable,
+            work_root,
+            timeout: Duration::from_secs(rt.config.discovery_timeout_seconds.unwrap_or(30)),
+            cancel: Some(run.cancel.clone()),
+        },
+        cred["api_key"].as_str().unwrap_or(""),
+    )
+    .map_err(|error| Fault::new(502, &error.code, &error.message))?;
+    let mut candidates = safe_candidates(snapshot.models, factory::bearer(cred))?;
+    for candidate in &mut candidates {
+        if let Some(fields) = candidate.as_object_mut() {
+            fields.retain(|name, _| {
+                [
+                    "id",
+                    "displayName",
+                    "modelProvider",
+                    "disabled",
+                    "deprecated",
+                    "isCustom",
+                    "isRouter",
+                    "kind",
+                    "noImageSupport",
+                    "tokenMultiplier",
+                ]
+                .contains(&name.as_str())
+            });
+        }
+    }
+    if !candidates.iter().any(|candidate| {
+        candidate_blocks(candidate).is_empty() && crate::catalog::model(candidate).is_some()
+    }) {
+        return Err(Fault::new(
+            502,
+            "empty_catalog",
+            "官方目录中没有支持的原生模型",
+        ));
+    }
+    cred["factory_catalog"] = json!({
+        "version":1, "candidates":candidates, "fetched_at":now(),
+        "cli_version":snapshot.cli_version, "protocol_version":snapshot.protocol_version
+    });
+    cred["factory_catalog_source"] = json!("official_droid_cli");
+    cred["factory_catalog_checked_at"] = json!(now());
+    Ok(())
+}
+
+/// Keep the catalog in CPA's credential so export/import and restart need no UI.
+pub fn restore_catalog(rt: &Runtime, cred: &Value) -> Result<()> {
+    let catalog = &cred["factory_catalog"];
+    if catalog["version"].as_u64() != Some(1) {
+        return Ok(());
+    }
+    let rows = catalog["candidates"]
+        .as_array()
+        .filter(|rows| !rows.is_empty() && rows.len() <= 1024)
+        .ok_or_else(|| Fault::input("Factory 凭据中的模型目录无效"))?;
+    let rows = safe_candidates(rows.clone(), factory::bearer(cred))?;
+    let mut store = rt.lock()?;
+    register_discovered_models(&mut store, &rows)?;
+    let account = store
+        .accounts
+        .get_mut(cred["account_id"].as_str().unwrap_or(""))
+        .ok_or_else(Fault::internal)?;
+    let fetched_at = catalog["fetched_at"].as_str().map(str::to_owned);
+    if account.discovery.fetched_at == fetched_at
+        && account.discovery.candidates == rows
+        && account.discovery.credential_fingerprint == credential_fingerprint(cred)
+    {
+        return Ok(());
+    }
+    account.discovery = DiscoveryState {
+        status: "catalog".into(),
+        source: "official_droid_cli".into(),
+        fetched_at,
+        stale: false,
+        cli_version: catalog["cli_version"].as_str().map(str::to_owned),
+        protocol_version: catalog["protocol_version"].as_str().map(str::to_owned),
+        candidates: rows,
+        credential_fingerprint: credential_fingerprint(cred),
+        message: String::new(),
+        ..DiscoveryState::default()
+    };
+    store.persist()
 }
 
 pub fn invalidate_routes(store: &mut Store) {
@@ -1076,7 +1150,7 @@ fn basic_call(
             callback,
             rt.lock()?.settings.request_timeout_seconds.min(60),
         )?;
-        let http = factory::llm_request(rt, &cred, &model, &request, &request_id, &op, &json!({}))?;
+        let http = factory::llm_request(rt, &cred, &model, &request, &op, &json!({}), &json!({}))?;
         let response = rt.host.call("host.http.do", &http)?;
         let status = response["StatusCode"]
             .as_u64()

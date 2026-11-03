@@ -5,10 +5,12 @@ mod factory;
 mod guard;
 pub mod host;
 mod management;
+mod oauth;
 mod pricing;
 mod protocol;
 mod quota_window_usage;
 mod state;
+mod wire;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,7 +24,6 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
-use uuid::Uuid;
 
 use host::{decode, encode, Host};
 use state::{Model, Store};
@@ -97,6 +98,9 @@ pub struct Runtime {
     discovery_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     lifecycle_lock: Mutex<()>,
     stop_lock: Mutex<()>,
+    oauth_sessions: oauth::Sessions,
+    oauth_rotations: oauth::Rotations,
+    wire_ids: wire::Identifiers,
     active_wait: (Mutex<()>, Condvar),
 }
 static RUNTIME: OnceLock<Mutex<Option<Arc<Runtime>>>> = OnceLock::new();
@@ -162,7 +166,18 @@ impl Runtime {
                 }
                 state.persist()?;
             }
+            let catalogs: Vec<_> = state
+                .accounts
+                .values()
+                .filter(|account| !account.deleted)
+                .map(|account| account.discovery.candidates.clone())
+                .collect();
+            for candidates in catalogs {
+                access::register_discovered_models(&mut state, &candidates)?;
+            }
         }
+        let wire_ids =
+            wire::Identifiers::new(&store.lock().map_err(|_| Fault::internal())?.wire_namespace)?;
         Ok(Arc::new(Self {
             store,
             host: Host::get()?,
@@ -181,6 +196,9 @@ impl Runtime {
             discovery_cancels: Mutex::new(HashMap::new()),
             lifecycle_lock: Mutex::new(()),
             stop_lock: Mutex::new(()),
+            oauth_sessions: Mutex::new(HashMap::new()),
+            oauth_rotations: Mutex::new(HashMap::new()),
+            wire_ids,
             active_wait: (Mutex::new(()), Condvar::new()),
         }))
     }
@@ -198,7 +216,7 @@ impl Runtime {
         self.config
             .factory_client_version
             .as_deref()
-            .unwrap_or("0.242.0")
+            .unwrap_or(wire::CLIENT_VERSION)
     }
     pub fn model(&self, id: &str) -> Result<Model> {
         let store = self.lock()?;
@@ -364,6 +382,14 @@ impl Runtime {
             ));
         }
         drop(drain_guard);
+        self.oauth_sessions
+            .lock()
+            .map_err(|_| Fault::internal())?
+            .clear();
+        self.oauth_rotations
+            .lock()
+            .map_err(|_| Fault::internal())?
+            .clear();
         let workers = self
             .workers
             .lock()
@@ -444,16 +470,16 @@ fn register() -> Value {
     json!({"schema_version":10,"metadata":{"Name":"Factory Droid","Version":env!("CARGO_PKG_VERSION"),
         "Author":"junxin367","GitHubRepository":env!("CARGO_PKG_REPOSITORY"),
         "ConfigFields":[
-            {"Name":"data-dir","Type":"string","Description":"脱敏状态和本地用量账本目录，默认 data/factory-droid"},
-            {"Name":"factory-client-version","Type":"string","Description":"Factory CLI 协议版本，默认 0.242.0"},
-            {"Name":"droid-cli-path","Type":"string","Description":"用于候选发现的官方 Droid 原生可执行文件绝对路径；不配置仍可手工验证"},
+            {"Name":"data-dir","Type":"string","Description":"脱敏状态与模型目录缓存，默认 data/factory-droid"},
+            {"Name":"factory-client-version","Type":"string","Description":"Factory CLI 协议版本，默认 1.2.0；升级前核对官方请求"},
+            {"Name":"droid-cli-path","Type":"string","Description":"自动同步官方目录的 Droid 原生可执行文件绝对路径；不配置时使用内置目录"},
             {"Name":"discovery-timeout-seconds","Type":"number","Description":"候选发现超时，默认30秒，范围10至120"},
             {"Name":"api-base-url","Type":"string","Description":"Factory API 地址；本地模拟需同时启用 allow-local-mock"},
             {"Name":"allow-local-mock","Type":"boolean","Description":"仅允许显式 localhost/127.0.0.1/[::1] 模拟服务"}]},
         "capabilities":{"auth_provider":true,"model_provider":true,"executor":true,"executor_model_scope":"oauth",
         "executor_input_formats":["openai","claude","openai-response"],"executor_output_formats":["openai","claude","openai-response"],"quota_provider":true,
         "request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":true,
-        "usage_plugin":true,"management_api":true}})
+        "usage_plugin":false,"management_api":true}})
 }
 
 pub fn shutdown() {
@@ -515,12 +541,8 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
             Ok(json!({"identifier":PROVIDER}))
         }
         "auth.parse" => factory::parse_auth(data),
-        "auth.login.start" => Err(Fault::new(
-            400,
-            "manual_authorization_required",
-            "请打开 Factory Droid 插件管理页填写 Factory API Key",
-        )),
-        "auth.login.poll" => Ok(json!({"Status":"failed","Error":"请在插件管理页填写 API Key"})),
+        "auth.login.start" => oauth::start(&runtime()?, data),
+        "auth.login.poll" => oauth::poll(&runtime()?, data),
         "auth.refresh" => factory::refresh_auth(&runtime()?, data),
         "model.static" => Ok(json!({"Provider":PROVIDER,"Models":[]})),
         "model.for_auth" => {
@@ -541,19 +563,10 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
                 return Ok(json!({"Provider":PROVIDER,"Models":[]}));
             }
             let store = rt.lock()?;
-            let account_state = store
-                .accounts
-                .get(account)
-                .cloned()
-                .ok_or_else(Fault::internal)?;
             let models: Vec<_> = store
                 .effective_models(account)
                 .iter()
-                .flat_map(|m| {
-                    let mut pinned = m.clone();
-                    pinned.id = account_state.pinned_id(m);
-                    [m.host_json(), pinned.host_json()]
-                })
+                .map(Model::host_json)
                 .collect();
             drop(store);
             if let Some(revision) = auth["factory_catalog_revision"].as_str() {
@@ -589,10 +602,9 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
             "unsupported_operation",
             "请通过 CPA 模型接口调用 Factory",
         ))),
-        "usage.handle" => {
-            usage(&runtime()?, data)?;
-            Ok(json!({}))
-        }
+        // CPA publishes usage and its management server owns history and pricing.
+        // Ignore any callback already queued by an older plugin instance.
+        "usage.handle" => Ok(json!({})),
         "quota.describe" => Ok(
             json!({"supported_providers":[PROVIDER],"display_name":"Factory Droid","supports_reset":false}),
         ),
@@ -651,15 +663,14 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
             .ok_or_else(|| Fault::input("宿主流 ID 缺失"))?;
         op.bind_downstream(downstream)?;
     }
-    let request_id = Uuid::new_v4().to_string();
     let http = factory::llm_request(
         rt,
         &cred,
         &model,
         &request,
-        &request_id,
         &op,
         &native_headers,
+        &data["Metadata"],
     )?;
     if !stream {
         let response = rt.host.call("host.http.do", &http)?;
@@ -732,76 +743,4 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
     }
     spawned?;
     Ok(json!({"headers":{"Content-Type":["text/event-stream"],"Cache-Control":["no-cache"]}}))
-}
-
-fn usage(rt: &Arc<Runtime>, data: &Value) -> Result<()> {
-    if data["Provider"].as_str() != Some(PROVIDER) {
-        return Ok(());
-    }
-    let request_id = data["RequestID"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Fault::input("宿主用量缺少 RequestID"))?;
-    let auth_id = data["AuthID"].as_str().unwrap_or("");
-    let mut store = rt.lock()?;
-    let account_id = store
-        .accounts
-        .values()
-        .find(|a| state::auth_id_matches(auth_id, &a.id, &a.auth_file))
-        .map(|a| a.id.clone())
-        .unwrap_or_else(|| "unknown".into());
-    let Some(model) = ["Model", "ResponseModel", "Alias"]
-        .into_iter()
-        .filter_map(|key| data[key].as_str())
-        .filter(|id| !id.is_empty())
-        .find_map(|id| store.account_model(&account_id, id))
-    else {
-        return Ok(());
-    };
-    let tokens = normalize_usage(&data["Detail"], &model);
-    store.record(
-        request_id,
-        &account_id,
-        &model,
-        data["Failed"].as_bool() != Some(true),
-        tokens,
-        data,
-    )?;
-    Ok(())
-}
-fn normalize_usage(detail: &Value, model: &Model) -> Option<state::UsageTokens> {
-    let raw_input = detail["InputTokens"].as_u64()?;
-    let output = detail["OutputTokens"].as_u64()?;
-    let cached = detail["CacheReadTokens"]
-        .as_u64()
-        .or_else(|| detail["CachedTokens"].as_u64())
-        .unwrap_or(0);
-    let cache_write = detail["CacheCreationTokens"].as_u64().unwrap_or(0);
-    let total = detail["TotalTokens"].as_u64().unwrap_or(0);
-    let input = if model.protocol == "anthropic" {
-        // A late host usage callback from the previous Chat-only implementation
-        // can already include cache. Its authoritative total identifies that case.
-        if total > 0 && total == raw_input.checked_add(output)? {
-            raw_input
-        } else {
-            raw_input.checked_add(cached)?.checked_add(cache_write)?
-        }
-    } else {
-        raw_input
-    };
-    if cached.checked_add(cache_write)? > input
-        || total > 0 && total != input.checked_add(output)?
-    {
-        return None;
-    }
-    if input == 0 && output == 0 {
-        return None;
-    }
-    Some(state::UsageTokens {
-        input,
-        output,
-        cached,
-        cache_write,
-        reasoning: detail["ReasoningTokens"].as_u64().unwrap_or(0),
-    })
 }

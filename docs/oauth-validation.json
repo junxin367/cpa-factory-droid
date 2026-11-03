@@ -1,0 +1,214 @@
+{
+  "verification_dates": [
+    "2026-11-03",
+    "2026-11-04"
+  ],
+  "host": "CPA v8.0.52",
+  "unit_tests": 6,
+  "native_checks": {
+    "checks": [
+      {
+        "name": "CPA 发布原生 OAuth 能力",
+        "passed": true
+      },
+      {
+        "name": "原生 OAuth 开始登录",
+        "passed": true
+      },
+      {
+        "name": "轮询遵守上游最小间隔",
+        "passed": true
+      },
+      {
+        "name": "授权后保存原生凭证",
+        "passed": true,
+        "status": "ok",
+        "error": null
+      },
+      {
+        "name": "单次授权只生成一个认证文件",
+        "passed": true
+      },
+      {
+        "name": "保存 OAuth 令牌和组织，不伪造 API Key",
+        "passed": true
+      },
+      {
+        "name": "不传令牌给 CLI 也能读取官方目录",
+        "passed": true,
+        "source": "official_droid_cli",
+        "count": 70
+      },
+      {
+        "name": "完成状态重复查询不重复保存",
+        "passed": true
+      },
+      {
+        "name": "原生模型 ID 唯一且无账号 UUID",
+        "passed": true,
+        "models": 54
+      },
+      {
+        "name": "CPA 自动续期并保存轮换令牌",
+        "passed": true,
+        "refresh_calls": 2
+      },
+      {
+        "name": "OAuth 凭证可通过 CPA 推理",
+        "passed": true,
+        "http": 200
+      },
+      {
+        "name": "使用 access token 与 Factory 组织头",
+        "passed": true
+      },
+      {
+        "name": "请求进入 CPA 原生用量统计",
+        "passed": true,
+        "http": 200,
+        "records": 1
+      },
+      {
+        "name": "插件状态不保存 OAuth 令牌",
+        "passed": true
+      },
+      {
+        "name": "重启后从原生 OAuth 凭证恢复模型",
+        "passed": true
+      },
+      {
+        "name": "OAuth 原生凭证可读取官方额度",
+        "passed": true,
+        "http": 200,
+        "fields": [
+          "subscription",
+          "groups"
+        ]
+      },
+      {
+        "name": "拒绝第三方授权地址",
+        "passed": true
+      },
+      {
+        "name": "denied 流程可以创建",
+        "passed": true
+      },
+      {
+        "name": "denied 状态正确",
+        "passed": true,
+        "status": "error"
+      },
+      {
+        "name": "expiry 流程可以创建",
+        "passed": true
+      },
+      {
+        "name": "expiry 状态正确",
+        "passed": true,
+        "status": "error"
+      },
+      {
+        "name": "pending 流程可以创建",
+        "passed": true
+      },
+      {
+        "name": "pending 状态正确",
+        "passed": true,
+        "status": "wait"
+      },
+      {
+        "name": "slow 流程可以创建",
+        "passed": true
+      },
+      {
+        "name": "slow 状态正确",
+        "passed": true,
+        "status": "wait"
+      },
+      {
+        "name": "slow_down 至少增加 5 秒",
+        "passed": true
+      },
+      {
+        "name": "失败或等待流程不生成凭证",
+        "passed": true
+      }
+    ],
+    "dll_sha256": "1534ea95ce2f5a1a6310886efc96f74635cd8057b6fe9b69d5a3b0443d2aeda9"
+  },
+  "abi_checks": [
+    {
+      "name": "OAuth 导入包含 CPA 续期调度元数据",
+      "passed": true
+    },
+    {
+      "name": "解析不提前写入账号缓存",
+      "passed": true
+    },
+    {
+      "name": "模型钩子前也能刷新原生凭证",
+      "passed": true
+    },
+    {
+      "name": "并发刷新仅交换一次令牌",
+      "passed": true
+    },
+    {
+      "name": "并发调用共享最新轮换结果",
+      "passed": true
+    },
+    {
+      "name": "重新安排到令牌到期前刷新",
+      "passed": true
+    },
+    {
+      "name": "身份接口故障仍交回已轮换令牌",
+      "passed": true
+    },
+    {
+      "name": "身份故障安排短期重试",
+      "passed": true
+    },
+    {
+      "name": "迟到刷新不重复消费旧 refresh token",
+      "passed": true
+    },
+    {
+      "name": "失效授权要求重新登录",
+      "passed": true
+    },
+    {
+      "name": "错误不泄露上游敏感详情",
+      "passed": true
+    },
+    {
+      "name": "拒绝缺少续期令牌的 OAuth 凭证",
+      "passed": true
+    },
+    {
+      "name": "已有 API Key 凭证仍可解析",
+      "passed": true
+    },
+    {
+      "name": "续期保留并发停用和名称修改",
+      "passed": true
+    },
+    {
+      "name": "插件缓存没有 access/refresh token",
+      "passed": true
+    }
+  ],
+  "deployed": {
+    "url": "http://127.0.0.1:60892",
+    "pid": 38332,
+    "sha256": "417f31629e546d97b27c67a366f24e02cb4cb6849508976eb6a605571a7cda8f",
+    "installed_sha256": "417f31629e546d97b27c67a366f24e02cb4cb6849508976eb6a605571a7cda8f",
+    "oauth_device": true,
+    "native_oauth": true,
+    "factory_models": 53,
+    "uuid_models": 0
+  },
+  "browser_verification": "CPA 原生 OAuth 弹窗与 Manager Plus 入口可见，Factory 官方设备确认页已打开",
+  "real_account_authorized": false,
+  "user_decision": "暂时不登录，保留已实现功能"
+}

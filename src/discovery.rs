@@ -67,8 +67,8 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// Returns candidate metadata only. The caller must separately verify whoami,
-/// native routing and actual account/model permissions before publishing models.
+/// Returns catalog metadata only. Identity and native routes are checked separately;
+/// model permissions are enforced by Factory when CPA executes a request.
 pub fn discover(options: Options, api_key: &str) -> Result<Snapshot> {
     check_cancel(&options)?;
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(120) {
@@ -77,10 +77,11 @@ pub fn discover(options: Options, api_key: &str) -> Result<Snapshot> {
             "模型发现超时须大于 0 且不超过 120 秒",
         ));
     }
-    if api_key.len() < 4
-        || api_key.len() > 8192
-        || !api_key.starts_with("fk-")
-        || api_key.chars().any(char::is_control)
+    if !api_key.is_empty()
+        && (api_key.len() < 4
+            || api_key.len() > 8192
+            || !api_key.starts_with("fk-")
+            || api_key.chars().any(char::is_control))
     {
         return Err(Error::new(
             "discovery_invalid_key",
@@ -206,8 +207,11 @@ fn run(options: &Options, executable: &Path, run_root: &Path, api_key: &str) -> 
             command.env(name, value);
         }
     }
+    // list_models is sessionless. OAuth tokens never enter the API-key variable or CLI storage.
+    if !api_key.is_empty() {
+        command.env("FACTORY_API_KEY", api_key);
+    }
     command
-        .env("FACTORY_API_KEY", api_key)
         .env("FACTORY_HOME_OVERRIDE", &home)
         .env("FACTORY_DISABLE_KEYRING", "1")
         .env("FACTORY_DISABLE_SETTINGS_PERSISTENCE", "1")
@@ -424,9 +428,10 @@ impl Received {
         if line.is_empty() {
             return Ok(());
         }
-        if line
-            .windows(api_key.len())
-            .any(|bytes| bytes == api_key.as_bytes())
+        if !api_key.is_empty()
+            && line
+                .windows(api_key.len())
+                .any(|bytes| bytes == api_key.as_bytes())
         {
             return Err(Error::new(
                 "discovery_sensitive_output",
@@ -658,6 +663,9 @@ fn has_sensitive_field(value: &Value, depth: usize) -> bool {
     }
 }
 fn contains_secret(value: &Value, secret: &str) -> bool {
+    if secret.is_empty() {
+        return false;
+    }
     match value {
         Value::String(text) => text.contains(secret),
         Value::Object(object) => object

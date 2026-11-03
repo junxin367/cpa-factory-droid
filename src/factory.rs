@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     host::{decode, encode},
+    oauth,
     state::{now, Account, Model},
-    Fault, Operation, Result, Runtime, PROVIDER,
+    wire, Fault, Operation, Result, Runtime, PROVIDER,
 };
 
 pub fn validate_base(value: &str, local: bool) -> Result<String> {
@@ -53,7 +54,7 @@ pub fn parse_auth(data: &Value) -> Result<Value> {
         return Ok(json!({"Handled":false}));
     }
     if cred["deleted"].as_bool() != Some(true) {
-        validate_key(cred["api_key"].as_str().unwrap_or(""))?;
+        validate_credential(&cred)?;
     }
     let id = cred["account_id"]
         .as_str()
@@ -74,7 +75,16 @@ pub fn parse_auth(data: &Value) -> Result<Value> {
     Ok(json!({"Handled":true,"Auth":auth}))
 }
 pub fn auth_data(cred: &Value, id: &str, file: &str) -> Value {
-    json!({"Provider":PROVIDER,"ID":id,"FileName":file,
+    let next_refresh = if oauth::is_oauth(cred) {
+        oauth::refresh_at(cred)
+    } else {
+        cred["factory_catalog_checked_at"]
+            .as_str()
+            .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+            .map(|time| time.with_timezone(&chrono::Utc) + chrono::Duration::hours(24))
+            .unwrap_or_else(chrono::Utc::now)
+    };
+    let mut data = json!({"Provider":PROVIDER,"ID":id,"FileName":file,
         "Label":cred["label"].as_str().unwrap_or("Factory"),
         "Disabled":cred["disabled"].as_bool().unwrap_or(false) || cred["deleted"].as_bool().unwrap_or(false),
         "StorageJSON":encode(cred.to_string()),
@@ -84,7 +94,31 @@ pub fn auth_data(cred: &Value, id: &str, file: &str) -> Value {
             "priority":cred["priority"].as_i64().unwrap_or(0)},
         "Attributes":{"factory_account_id":cred["account_id"].as_str().unwrap_or(""),
             "priority":cred["priority"].as_i64().unwrap_or(0).to_string()},
-        "NextRefreshAfter":(chrono::Utc::now()+chrono::Duration::hours(24)).to_rfc3339()})
+        "NextRefreshAfter":next_refresh.to_rfc3339()});
+    if oauth::is_oauth(cred) {
+        data["Metadata"]["expires_at"] = cred["expires_at"].clone();
+        data["Metadata"]["last_refresh"] = cred["last_refresh"].clone();
+        // Unknown plugin providers need an explicit interval to enter CPA's refresh scheduler.
+        data["Metadata"]["refresh_interval_seconds"] = json!(300);
+        data["Metadata"]["auth_method"] = json!("oauth");
+    }
+    data
+}
+pub fn bearer(cred: &Value) -> &str {
+    cred[if oauth::is_oauth(cred) {
+        "access_token"
+    } else {
+        "api_key"
+    }]
+    .as_str()
+    .unwrap_or("")
+}
+pub fn validate_credential(cred: &Value) -> Result<()> {
+    if oauth::is_oauth(cred) {
+        oauth::validate(cred)
+    } else {
+        validate_key(cred["api_key"].as_str().unwrap_or(""))
+    }
 }
 pub fn validate_key(key: &str) -> Result<()> {
     if !key.starts_with("fk-")
@@ -129,7 +163,7 @@ pub fn ensure_enabled(rt: &Runtime, cred: &Value) -> Result<()> {
             "Factory 账号尚未完成本插件的模型验证",
         ));
     }
-    validate_key(cred["api_key"].as_str().unwrap_or(""))
+    validate_credential(cred)
 }
 pub fn key_hint(key: &str) -> String {
     let last = key
@@ -250,7 +284,17 @@ fn upsert_account_version(
     account.revision = account.revision.saturating_add(1);
     account.deleted = deleted;
     account.priority = cred["priority"].as_i64().unwrap_or(0).clamp(-100, 100);
-    account.credential_hint = key_hint(cred["api_key"].as_str().unwrap_or(""));
+    account.kind = if oauth::is_oauth(cred) {
+        "oauth"
+    } else {
+        "api_key"
+    }
+    .into();
+    account.credential_hint = if oauth::is_oauth(cred) {
+        "OAuth".into()
+    } else {
+        key_hint(bearer(cred))
+    };
     account.auth_file = file.into();
     account.updated_at = now();
     account.identity =
@@ -291,24 +335,26 @@ pub fn observe_model_account(rt: &Runtime, cred: &Value, file: &str) -> Result<b
     if cred["deleted"] == true {
         return Ok(false);
     }
-    validate_key(cred["api_key"].as_str().unwrap_or(""))?;
+    validate_credential(cred)?;
     let id = cred["account_id"]
         .as_str()
         .filter(|id| valid_id(id))
         .ok_or_else(|| Fault::input("Factory账号ID无效"))?;
     let existing = rt.lock()?.accounts.get(id).cloned();
-    // Late callbacks from an already removed/modified credential cannot resurrect it.
+    // model.for_auth is CPA's native credential reload hook, including enable/disable.
     if let Some(account) = &existing {
         if account.deleted {
             return Ok(false);
         }
-        if account.credential_fingerprint != crate::access::credential_fingerprint(cred) {
-            return Ok(false);
+        if account.credential_fingerprint == crate::access::credential_fingerprint(cred)
+            && account.enabled == (cred["disabled"].as_bool() != Some(true))
+            && account.label == cred["label"].as_str().unwrap_or("Factory")
+            && account.priority == cred["priority"].as_i64().unwrap_or(0).clamp(-100, 100)
+            && account.auth_file == file
+        {
+            crate::access::restore_catalog(rt, cred)?;
+            return Ok(true);
         }
-        if account.enabled != (cred["disabled"].as_bool() != Some(true)) {
-            return Ok(false);
-        }
-        return Ok(true);
     }
     if cred["deleted"].as_bool() == Some(true) {
         return Ok(false);
@@ -319,6 +365,7 @@ pub fn observe_model_account(rt: &Runtime, cred: &Value, file: &str) -> Result<b
     }
     let file = if file.is_empty() { &fallback } else { file };
     upsert_account(rt, cred, file, false)?;
+    crate::access::restore_catalog(rt, cred)?;
     Ok(true)
 }
 pub fn valid_auth_filename(name: &str) -> bool {
@@ -349,9 +396,35 @@ pub fn unavailable_limits(status: &str, message: &str) -> Value {
     json!({"status":status,"source":"factory_billing_limits","windows":[],"extra_usage_balance_usd":null,"checked_at":null,"message":message})
 }
 fn headers(rt: &Runtime, cred: &Value) -> Value {
-    json!({"Authorization":[format!("Bearer {}",cred["api_key"].as_str().unwrap_or(""))],
+    let mut headers = json!({"Authorization":[format!("Bearer {}",bearer(cred))],
         "Accept":["application/json"],"X-Factory-Client":["cli"],"X-Client-Version":[rt.client_version()],
-        "User-Agent":[format!("factory-cli/{}",rt.client_version())]})
+        "User-Agent":[format!("factory-cli/{}",rt.client_version())]});
+    if oauth::is_oauth(cred) {
+        if let Some(org) = cred["org_id"].as_str().filter(|s| {
+            !s.is_empty()
+                && s.len() <= 200
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }) {
+            headers["X-Factory-Org-Id"] = json!([org]);
+        }
+    }
+    headers
+}
+fn api_headers(rt: &Runtime, cred: &Value, path: &str) -> Value {
+    let mut headers = headers(rt, cred);
+    headers["User-Agent"] = json!([wire::FETCH_USER_AGENT]);
+    headers["Accept"] = json!(["*/*"]);
+    if path.starts_with("/api/cli/") {
+        if let Some(fields) = headers.as_object_mut() {
+            fields.remove("X-Client-Version");
+            fields.remove("X-Factory-Client");
+        }
+    }
+    if path.starts_with("/api/billing/") {
+        headers["traceparent"] = json!([wire::traceparent()]);
+    }
+    headers
 }
 pub fn account_base(rt: &Runtime, cred: &Value) -> String {
     if rt.config.allow_local_mock
@@ -393,9 +466,9 @@ pub fn llm_request(
     cred: &Value,
     model: &Model,
     request: &Value,
-    request_id: &str,
     op: &Operation,
     native_headers: &Value,
+    metadata: &Value,
 ) -> Result<Value> {
     let base = llm_base(rt, cred)?;
     let path = match model.protocol.as_str() {
@@ -404,41 +477,15 @@ pub fn llm_request(
         _ => "/api/llm/o/v1/chat/completions",
     };
     let mut h = headers(rt, cred);
-    let allowlist: &[&str] = if model.protocol == "anthropic" {
-        &["anthropic-version", "anthropic-beta"]
-    } else {
-        &["OpenAI-Beta"]
-    };
-    for name in allowlist {
-        let values = crate::guard::header_values(native_headers, name);
-        if !values.is_empty() {
-            if values.iter().any(|value| {
-                value.len() > 8192 || value.bytes().any(|b| b < 0x20 && b != b'\t' || b == 0x7f)
-            }) {
-                return Err(Fault::new(
-                    400,
-                    "invalid_native_request",
-                    "协议语义请求头无效",
-                ));
-            }
-            h[*name] = json!(values);
-        }
-    }
-    crate::catalog::apply_required_headers(&mut h, model);
+    wire::protocol_headers(&mut h, native_headers, model)?;
+    let identity = wire::identity(rt, cred, native_headers, metadata, request)?;
+    let request = wire::payload(request, model, &identity)?;
     h["Content-Type"] = json!(["application/json"]);
     h["x-api-provider"] = json!([model.upstream_provider]);
-    h["x-session-id"] = json!([format!(
-        "cpa-{}",
-        cred["account_id"].as_str().unwrap_or("factory")
-    )]);
-    h["x-assistant-message-id"] = json!([request_id]);
+    h["x-session-id"] = json!([identity.session]);
+    h["x-assistant-message-id"] = json!([identity.message]);
+    h["traceparent"] = json!([identity.trace]);
     h["x-provider-routing-source"] = json!(["registry_default"]);
-    if model.protocol == "anthropic" {
-        h["X-Api-Key"] = json!(["placeholder"]);
-        if h["anthropic-version"].is_null() {
-            h["anthropic-version"] = json!(["2023-06-01"]);
-        }
-    }
     if model.upstream_provider == "openai" {
         h["OpenAI-Platform"] = json!(["org-bHuLtG1fGmYk5YaOihAAXFBw"]);
     }
@@ -484,7 +531,7 @@ pub fn get(
     extra: Option<Value>,
 ) -> Result<(u16, Value)> {
     let op = rt.operation(callback, timeout)?;
-    let mut h = headers(rt, cred);
+    let mut h = api_headers(rt, cred, path);
     if let Some(extra) = extra.and_then(|v| v.as_object().cloned()) {
         for (k, v) in extra {
             h[&k] = v;
@@ -523,10 +570,12 @@ pub fn whoami(rt: &Arc<Runtime>, cred: &mut Value, callback: &str) -> Result<()>
             "Factory 身份响应格式无法识别",
         ));
     }
-    let secret = cred["api_key"].as_str().unwrap_or("");
+    let secret = bearer(cred);
+    let refresh = cred["refresh_token"].as_str().unwrap_or("");
     let sensitive = |value: &Value| {
         value.as_str().is_some_and(|text| {
             !secret.is_empty() && text.contains(secret)
+                || !refresh.is_empty() && text.contains(refresh)
                 || text.contains("fk-")
                 || text.contains("sk-")
         })
@@ -604,6 +653,10 @@ pub fn refresh_auth(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
     if cred["deleted"].as_bool() == Some(true) {
         return Err(Fault::new(401, "credential_deleted", "Factory 账号已删除"));
     }
+    validate_credential(&cred)?;
+    if oauth::is_oauth(&cred) {
+        return oauth::refresh(rt, data, cred);
+    }
     let id = cred["account_id"]
         .as_str()
         .ok_or_else(|| Fault::input("账号 ID 缺失"))?
@@ -634,7 +687,9 @@ pub fn refresh_auth(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
         .map(|a| a.auth_file.clone())
         .filter(|name| valid_auth_filename(name))
         .ok_or_else(|| Fault::input("Factory凭据文件名无效"))?;
+    crate::access::refresh_catalog(rt, &mut cred)?;
     upsert_account_version(rt, &cred, &name, true, Some(revision))?;
+    crate::access::restore_catalog(rt, &cred)?;
     Ok(
         json!({"Auth":auth_data(&cred,data["AuthID"].as_str().unwrap_or(&name),&name),
         "NextRefreshAfter":(chrono::Utc::now()+chrono::Duration::hours(24)).to_rfc3339()}),
@@ -722,116 +777,6 @@ pub fn save_account(rt: &Runtime, cred: &Value, name: &str) -> Result<Value> {
     rt.host
         .call("host.auth.save", &json!({"name":name,"json":cred}))
 }
-pub fn read_official(rt: &Arc<Runtime>, cred: &Value, callback: &str) -> (Value, Value) {
-    let mut limits = match get(rt, cred, "/api/billing/limits", callback, 15, None) {
-        Ok((200, v)) => normalize_limits(&v).unwrap_or_else(|| {
-            unavailable_limits("unavailable", "Factory 官方额度响应格式未知，未推导余额")
-        }),
-        Ok((401 | 403, _)) => unavailable_limits("unavailable", "当前凭据无官方额度查询权限"),
-        Ok((_, _)) => unavailable_limits("unavailable", "Factory 官方额度接口暂不可用"),
-        Err(_) => unavailable_limits("error", "官方额度查询失败或超时"),
-    };
-    limits["checked_at"] = json!(now());
-    let window = rt.lock().ok().and_then(|s| s.settings.window().ok());
-    let mut usage = if let Some((start, end)) = window {
-        read_analytics(rt, cred, callback, &start, &end)
-    } else {
-        unavailable_usage("error", "统计窗口无效")
-    };
-    usage["checked_at"] = json!(now());
-    (limits, usage)
-}
-fn read_analytics(
-    rt: &Arc<Runtime>,
-    cred: &Value,
-    callback: &str,
-    start: &str,
-    end: &str,
-) -> Value {
-    use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
-    let unknown = |message: &str| unavailable_usage("unavailable", message);
-    let (Ok(start_at), Ok(end_at)) = (
-        DateTime::parse_from_rfc3339(start),
-        DateTime::parse_from_rfc3339(end),
-    ) else {
-        return unknown("统计窗口无效");
-    };
-    let start_at = start_at.with_timezone(&Utc);
-    let end_at = end_at.with_timezone(&Utc);
-    let current = Utc::now();
-    let calendar = rt
-        .lock()
-        .ok()
-        .is_some_and(|s| s.settings.usage_window == "calendar_month");
-    if start_at.time().num_seconds_from_midnight() != 0
-        || start_at.timestamp_subsec_nanos() != 0
-        || !calendar
-            && (end_at.time().num_seconds_from_midnight() != 0
-                || end_at.timestamp_subsec_nanos() != 0)
-    {
-        return unknown("Factory Analytics 仅提供 UTC 自然日汇总，无法精确统计此子日窗口");
-    }
-    let cutoff = NaiveDate::from_ymd_opt(2026, 1, 14).unwrap();
-    if start_at.date_naive() < cutoff {
-        return unknown("Factory Analytics 仅支持2026-01-14及之后的数据，未将部分日期当作完整窗口");
-    }
-    if start_at >= current {
-        return unknown("统计窗口尚未开始，没有可查询的官方用量");
-    }
-    let effective_end = end_at.min(current);
-    let mut day = start_at.date_naive();
-    // Factory's dates are inclusive. The plugin's configured window is half-open.
-    let last = if effective_end.time().num_seconds_from_midnight() == 0
-        && effective_end.timestamp_subsec_nanos() == 0
-    {
-        effective_end.date_naive() - Duration::days(1)
-    } else {
-        effective_end.date_naive()
-    };
-    let mut used = 0.0;
-    while day <= last {
-        let chunk_end = (day + Duration::days(89)).min(last);
-        let path=format!("/api/v1/analytics/cost/me/query?queryKey=headline_daily&startDate={day}&endDate={chunk_end}");
-        match get(rt, cred, &path, callback, 15, None) {
-            Ok((200, value)) => {
-                let Some(rows) = value["data"].as_array() else {
-                    return unknown("Factory Analytics响应格式未知");
-                };
-                let mut dates = std::collections::BTreeSet::new();
-                for row in rows {
-                    let Some(date) = row["date"]
-                        .as_str()
-                        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-                        .filter(|date| *date >= day && *date <= chunk_end && dates.insert(*date))
-                    else {
-                        return unknown(
-                            "Factory Analytics日期超出请求范围、重复或无效，未估算用量",
-                        );
-                    };
-                    let _ = date;
-                    let Some(fsc) = row["fsc"].as_f64().filter(|n| n.is_finite() && *n >= 0.0)
-                    else {
-                        return unknown("Factory Analytics用量字段无效");
-                    };
-                    used += fsc;
-                    if !used.is_finite() {
-                        return unknown("Factory Analytics用量超过有效范围");
-                    }
-                }
-            }
-            Ok((401 | 403, _)) => {
-                return unknown("Analytics需Enterprise并启用Analytics；当前凭据无查询权限")
-            }
-            Ok((_, _)) => return unknown("Factory Analytics暂不可用，未将部分查询作为完整窗口"),
-            Err(_) => return unavailable_usage("error", "官方用量查询失败或超时"),
-        }
-        day = chunk_end + Duration::days(1);
-    }
-    json!({"status":"available","source":"factory_analytics","unit":"FSC","used":used,
-        "window_start":start,"window_end":effective_end.to_rfc3339_opts(chrono::SecondsFormat::Secs,true),
-        "requested_window_end":end,"partial":effective_end<end_at,"checked_at":now(),
-        "message":"Factory官方UTC自然日汇总；当前日可继续变化；不代表剩余额度"})
-}
 pub fn normalize_limits(value: &Value) -> Option<Value> {
     let mut windows = Vec::new();
     for (group, prefix) in [("standard", "标准"), ("core", "Droid Core")] {
@@ -897,26 +842,20 @@ pub fn normalize_limits(value: &Value) -> Option<Value> {
 }
 pub fn quota(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
     let cred = credential(data, "storage_json")?;
-    let id = cred["account_id"].as_str().unwrap_or("");
     let callback = data["host_callback_id"].as_str().unwrap_or("");
-    let (limits, official) = read_official(rt, &cred, callback);
-    let mut store = rt.lock()?;
-    store.sample_quota(id, &limits);
-    if let Some(account) = store.accounts.get_mut(id) {
-        account.official_limits = limits.clone();
-        account.official_usage = official;
+    let (code, response) = get(rt, &cred, "/api/billing/limits", callback, 15, None)?;
+    if code != 200 {
+        return Err(Fault::new(
+            code,
+            "quota_fetch_failed",
+            "Factory 额度查询失败",
+        ));
     }
-    store.persist()?;
-    let usage = store.usage(Some(id));
-    let mut summary = vec![
-        json!({"key":"local_requests","label":"本插件成功请求","value":usage["requests"],"unit":"次","format":"number"}),
-        json!({"key":"local_estimated_credits","label":"本地估算消耗","value":usage["estimated_credits"],"unit":"加权 token","format":"number"}),
-    ];
+    let limits = normalize_limits(&response)
+        .ok_or_else(|| Fault::new(502, "invalid_quota", "Factory 未返回可识别的额度数据"))?;
+    let mut summary = Vec::new();
     if let Some(balance) = limits["extra_usage_balance_usd"].as_f64() {
         summary.push(json!({"key":"extra_usage_balance","label":"官方额外用量余额","value":balance,"format":"currency","currency":"USD"}));
-    }
-    if let Some(cost) = usage["estimated_cost_usd"].as_f64() {
-        summary.push(json!({"key":"local_estimated_usd","label":"本地估算费用","value":cost,"format":"currency","currency":"USD"}));
     }
     let mut groups = Vec::new();
     for (key, label) in [
@@ -925,7 +864,7 @@ pub fn quota(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
     ] {
         let buckets: Vec<_>=limits["windows"].as_array().into_iter().flatten().filter(|w|w["group"].as_str()==Some(key)).map(|w|json!({
             "window":w["name"],"remainingFraction":w["remaining_fraction"],"resetTime":w["reset_at"].as_str().unwrap_or(""),
-            "description":"Factory 官方返回的滚动窗口"})).collect();
+            "description":w["name"]})).collect();
         if !buckets.is_empty() {
             groups.push(json!({"displayName":label,"buckets":buckets}));
         }

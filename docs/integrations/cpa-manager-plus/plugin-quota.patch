@@ -1,0 +1,410 @@
+diff --git a/apps/web/src/features/accounts/AccountsPage.tsx b/apps/web/src/features/accounts/AccountsPage.tsx
+index 8300264..90d55eb 100644
+--- a/apps/web/src/features/accounts/AccountsPage.tsx
++++ b/apps/web/src/features/accounts/AccountsPage.tsx
+@@ -66,6 +66,8 @@ import {
+ import {
+   getScopedQuotaState,
+ } from '@/components/quota/quotaConfigs';
++import { fetchPluginQuota, isPluginQuotaFile } from './model/pluginQuota';
++import { isQuotaCacheGenerationCurrent } from '@/stores/useQuotaStore';
+ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+ import { useInterval } from '@/hooks/useInterval';
+ import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
+@@ -453,6 +455,7 @@ const getMainListQuotaWindowLimit = (
+       ? ANTIGRAVITY_MAIN_LIST_QUOTA_WINDOW_LIMIT
+       : 2;
+   }
++  if (isPluginQuotaFile(row.raw)) return 3;
+   return layoutMode === 'table' ? 4 : 2;
+ };
+ 
+@@ -1389,6 +1392,8 @@ export function AccountsPage() {
+   const kimiQuota = useQuotaStore((state) => state.kimiQuota);
+   const metaQuota = useQuotaStore((state) => state.metaQuota);
+   const xaiQuota = useQuotaStore((state) => state.xaiQuota);
++  const pluginQuota = useQuotaStore((state) => state.pluginQuota);
++  const setPluginQuota = useQuotaStore((state) => state.setPluginQuota);
+   const baseQuotaStores = useMemo(
+     () => ({
+       antigravityQuota,
+@@ -1398,8 +1403,9 @@ export function AccountsPage() {
+       kimiQuota,
+       metaQuota,
+       xaiQuota,
++      pluginQuota,
+     }),
+-    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, metaQuota, xaiQuota]
++    [antigravityQuota, claudeQuota, codexQuota, devinQuota, kimiQuota, metaQuota, xaiQuota, pluginQuota]
+   );
+   const setAntigravityQuota = useQuotaStore((state) => state.setAntigravityQuota);
+   const setClaudeQuota = useQuotaStore((state) => state.setClaudeQuota);
+@@ -6517,9 +6523,39 @@ export function AccountsPage() {
+       row: AccountRow,
+       mode: AccountQuotaRefreshMode = 'summary'
+     ): Promise<AccountQuotaRefreshOutcome> => {
+-      if (row.runtimeOnly || !isQuotaRefreshSupportedProvider(row.provider)) {
++      if (row.runtimeOnly || !isQuotaRefreshSupportedProvider(row.provider, row.raw)) {
+         return { status: 'ignored' };
+       }
++      if (isPluginQuotaFile(row.raw)) {
++        const key = getQuotaCredentialStoreKey(row.raw);
++        const generation = quotaRefreshGenerationRef.current;
++        const cacheGeneration = captureQuotaCacheGeneration();
++        const currentRequest = beginAccountQuotaRequest(quotaRequestVersionsRef.current, `plugin:${key}`);
++        const isCurrent = () => isMountedRef.current && currentRequest() &&
++          quotaRefreshGenerationRef.current === generation && isQuotaCacheGenerationCurrent(cacheGeneration);
++        const identity = buildQuotaCredentialIdentity(row.raw);
++        setPluginQuota((current) => ({
++          ...current, [key]: { ...identity, status: 'loading', windows: [], planType: null }
++        }));
++        try {
++          const data = await fetchPluginQuota(row.raw, authFilesRequestScope);
++          if (!isCurrent()) return { status: 'ignored' };
++          setPluginQuota((current) => ({
++            ...current, [key]: { ...identity, ...data, status: 'success', fetchedAtMs: Date.now() }
++          }));
++          return { status: 'success' };
++        } catch (error) {
++          if (!isCurrent()) return { status: 'ignored' };
++          const message = error instanceof Error ? error.message : t('common.unknown_error');
++          const errorStatus = typeof error === 'object' && error !== null && 'status' in error &&
++            typeof error.status === 'number' ? error.status : undefined;
++          setPluginQuota((current) => ({
++            ...current, [key]: { ...identity, status: 'error', windows: [], planType: null,
++              error: message, errorStatus, failedAtMs: Date.now() }
++          }));
++          return { status: 'error', error: message, errorStatus };
++        }
++      }
+       const refreshWithConfig = <TState, TData>(
+         config: QuotaConfig<TState, TData>,
+         setQuota: QuotaSetter<TState>,
+@@ -6643,6 +6679,7 @@ export function AccountsPage() {
+       t,
+       authFilesRequestScope,
+       baseQuotaStores,
++      setPluginQuota,
+     ]
+   );
+ 
+@@ -6653,7 +6690,7 @@ export function AccountsPage() {
+         return currentBatch.promise;
+       }
+       const refreshable = targets.filter(
+-        (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
++        (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider, row.raw)
+       );
+       if (refreshable.length === 0) {
+         showNotification(t('accounts.no_refreshable_accounts'), 'warning');
+@@ -6803,7 +6840,7 @@ export function AccountsPage() {
+ 
+   const refreshAccountQuota = useCallback(
+     async (row: AccountRow, mode: AccountQuotaRefreshMode = 'summary'): Promise<void> => {
+-      if (row.runtimeOnly || !isQuotaRefreshSupportedProvider(row.provider)) return;
++      if (row.runtimeOnly || !isQuotaRefreshSupportedProvider(row.provider, row.raw)) return;
+       const refreshKey = getAccountQuotaRefreshKey(row);
+       if (manualQuotaRefreshingKeysRef.current.has(refreshKey)) return;
+ 
+@@ -8368,7 +8405,7 @@ export function AccountsPage() {
+     const hasSelection = selectionCount > 0;
+     const refreshTargets = hasSelection ? selectedRows : pageRows;
+     const hasRefreshableTargets = refreshTargets.some(
+-      (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
++      (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider, row.raw)
+     );
+     const showSelectionControls = isSelectionMode || hasSelection;
+ 
+@@ -8532,7 +8569,7 @@ export function AccountsPage() {
+                 disableControls ||
+                 quotaRefreshing ||
+                 !selectedRows.some(
+-                  (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider)
++                  (row) => !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider, row.raw)
+                 )
+               }
+               loading={quotaRefreshing}
+@@ -8615,7 +8652,7 @@ export function AccountsPage() {
+       targetRow.provider === CODEX_CONFIG.type ? 'detail' : 'summary';
+ 
+     const refreshButton =
+-      !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider) ? (
++      !row.runtimeOnly && isQuotaRefreshSupportedProvider(row.provider, row.raw) ? (
+         <Button
+           variant="secondary"
+           size="sm"
+@@ -10240,7 +10277,7 @@ export function AccountsPage() {
+                 {t('accounts.recommend_action_reauth')}
+               </Button>
+             ) : null}
+-            {!selectedRow.runtimeOnly && isQuotaRefreshSupportedProvider(selectedRow.provider) ? (
++            {!selectedRow.runtimeOnly && isQuotaRefreshSupportedProvider(selectedRow.provider, selectedRow.raw) ? (
+               <Button
+                 variant="secondary"
+                 onClick={() => void refreshAccountQuota(selectedRow, 'detail')}
+diff --git a/apps/web/src/features/accounts/model/accountQuotaDisplayWindows.ts b/apps/web/src/features/accounts/model/accountQuotaDisplayWindows.ts
+index f16412d..8f2a648 100644
+--- a/apps/web/src/features/accounts/model/accountQuotaDisplayWindows.ts
++++ b/apps/web/src/features/accounts/model/accountQuotaDisplayWindows.ts
+@@ -47,6 +47,7 @@ export type AccountQuotaWindowSource =
+   | 'kimi'
+   | 'meta'
+   | 'xai'
++  | 'plugin'
+   | 'summary';
+ 
+ export interface AccountQuotaDisplayWindow {
+@@ -865,6 +866,27 @@ export const buildAccountQuotaDisplayWindows = (
+     if (windows.length) return windows;
+   }
+ 
++  const plugin = getCredentialScopedQuotaState(options.stores.pluginQuota ?? {}, row.raw);
++  if (plugin?.status === 'success' && plugin.windows.length) {
++    return plugin.windows.map((window) => buildAccountQuotaDisplayWindow({
++      key: `plugin:${window.id}`,
++      label: window.label,
++      groupLabel: window.group,
++      kind: window.kind,
++      remainingPercent: window.remainingPercent,
++      usedPercent: window.remainingPercent === null ? null : 100 - window.remainingPercent,
++      resetLabel: window.resetAtMs === null ? '-' : formatQuotaResetTime(window.resetAtMs),
++      resetAtMs: window.resetAtMs,
++      resetAccuracy: window.resetAtMs === null ? 'unknown' : 'exact',
++      limitWindowSeconds: window.durationSeconds,
++      windowMode: window.durationSeconds === null ? 'unknown' : 'rolling',
++      source: 'plugin',
++      observedAtMs: plugin.fetchedAtMs ?? null,
++      // A generic plugin quota group does not establish the corresponding model set.
++      modelScope: { kind: 'family', key: window.group, complete: false },
++      nowMs: options.nowMs,
++    }));
++  }
+   return buildSummaryQuotaDisplayWindow(row, options);
+ };
+ 
+diff --git a/apps/web/src/features/accounts/model/accountQuotaSummary.ts b/apps/web/src/features/accounts/model/accountQuotaSummary.ts
+index 0e0d44e..bd29c74 100644
+--- a/apps/web/src/features/accounts/model/accountQuotaSummary.ts
++++ b/apps/web/src/features/accounts/model/accountQuotaSummary.ts
+@@ -74,6 +74,7 @@ export interface AccountQuotaSummary {
+ }
+ 
+ export interface AccountQuotaStores {
++  pluginQuota?: Record<string, import('./pluginQuota').PluginQuotaState>;
+   antigravityQuota: Record<string, AntigravityQuotaState>;
+   claudeQuota: Record<string, ClaudeQuotaState>;
+   codexQuota: Record<string, CodexQuotaState>;
+@@ -1163,6 +1164,22 @@ export const resolveAccountQuota = (
+     );
+   }
+ 
++  const plugin = getCredentialScopedQuotaState(stores.pluginQuota ?? {}, file);
++  if (plugin) {
++    if (plugin.status === 'loading') return loadingQuota(plugin.planType ?? filePlanType);
++    if (plugin.status === 'error') {
++      return quotaFromError(plugin.error, plugin.planType ?? filePlanType, plugin.errorStatus, plugin.failedAtMs);
++    }
++    return quotaFromRemainingWindows(
++      plugin.windows.map((window) => ({
++        remainingPercent: window.remainingPercent,
++        resetAtMs: window.resetAtMs,
++        resetAccuracy: window.resetAtMs === null ? 'unknown' : 'exact',
++      })),
++      plugin.planType ?? filePlanType,
++      { fetchedAtMs: plugin.fetchedAtMs }
++    );
++  }
+   return emptyQuota(filePlanType);
+ };
+ 
+diff --git a/apps/web/src/features/accounts/model/accountsPagePresentation.ts b/apps/web/src/features/accounts/model/accountsPagePresentation.ts
+index 60b5ba3..5b2c865 100644
+--- a/apps/web/src/features/accounts/model/accountsPagePresentation.ts
++++ b/apps/web/src/features/accounts/model/accountsPagePresentation.ts
+@@ -781,6 +781,10 @@ export const selectAccountQuotaMainListWindows = (
+   quotaWindows: AccountQuotaDisplayWindow[],
+   maxWindows = 2
+ ): AccountQuotaDisplayWindow[] => {
++  if (quotaWindows.some((window) => window.source === 'plugin')) {
++    const group = quotaWindows[0]?.groupLabel;
++    return quotaWindows.filter((window) => window.groupLabel === group).slice(0, maxWindows);
++  }
+   const standardQuotaWindows = quotaWindows.filter(isStandardAccountQuotaListWindow);
+   let candidates: AccountQuotaDisplayWindow[];
+ 
+diff --git a/apps/web/src/features/authFiles/constants.ts b/apps/web/src/features/authFiles/constants.ts
+index bf34032..4fab66c 100644
+--- a/apps/web/src/features/authFiles/constants.ts
++++ b/apps/web/src/features/authFiles/constants.ts
+@@ -162,8 +162,10 @@ export const normalizeProviderKey = (value: string) => {
+   return key;
+ };
+ 
+-export const isQuotaRefreshSupportedProvider = (provider: string): boolean =>
+-  QUOTA_PROVIDER_TYPES.has(normalizeProviderKey(provider) as QuotaProviderType);
++export const isQuotaRefreshSupportedProvider = (provider: string, file?: AuthFileItem): boolean =>
++  QUOTA_PROVIDER_TYPES.has(normalizeProviderKey(provider) as QuotaProviderType) ||
++  Boolean(file && (file.supports_quota === true || file.supportsQuota === true) &&
++    (file.quota_provider || file.quotaProvider));
+ 
+ 
+ export const getEquivalentProviderKeys = (value: string): string[] => {
+diff --git a/apps/web/src/stores/useQuotaStore.ts b/apps/web/src/stores/useQuotaStore.ts
+index 2e27ee5..32561da 100644
+--- a/apps/web/src/stores/useQuotaStore.ts
++++ b/apps/web/src/stores/useQuotaStore.ts
+@@ -16,6 +16,7 @@ import type {
+ } from '@/types';
+ import { obfuscatedStorage } from '@/services/storage/secureStorage';
+ import { STORAGE_KEY_QUOTA_CACHE } from '@/utils/constants';
++import type { PluginQuotaState } from '@/features/accounts/model/pluginQuota';
+ 
+ type QuotaUpdater<T> = T | ((prev: T) => T);
+ 
+@@ -29,6 +30,8 @@ interface QuotaStoreState {
+   kimiQuota: Record<string, KimiQuotaState>;
+   metaQuota: Record<string, MetaQuotaState>;
+   xaiQuota: Record<string, XaiQuotaState>;
++  pluginQuota: Record<string, PluginQuotaState>;
++  setPluginQuota: (updater: QuotaUpdater<Record<string, PluginQuotaState>>) => void;
+   setAntigravityQuota: (updater: QuotaUpdater<Record<string, AntigravityQuotaState>>) => void;
+   setClaudeQuota: (updater: QuotaUpdater<Record<string, ClaudeQuotaState>>) => void;
+   setCodexQuota: (updater: QuotaUpdater<Record<string, CodexQuotaState>>) => void;
+@@ -55,6 +58,7 @@ const emptyQuotaState = {
+   kimiQuota: {},
+   metaQuota: {},
+   xaiQuota: {},
++  pluginQuota: {},
+ };
+ 
+ type PersistableQuotaState = CredentialScopedQuotaState & {
+@@ -173,6 +177,10 @@ export const useQuotaStore = create<QuotaStoreState>()(
+         set((state) => ({
+           xaiQuota: resolveUpdater(updater, state.xaiQuota),
+         })),
++      setPluginQuota: (updater) =>
++        set((state) => ({
++          pluginQuota: resolveUpdater(updater, state.pluginQuota),
++        })),
+       activateQuotaCacheScope: (scope) =>
+         set((state) => {
+           const nextScope = scope.trim();
+@@ -207,6 +215,7 @@ export const useQuotaStore = create<QuotaStoreState>()(
+         kimiQuota: filterPersistableQuotaStates(state.kimiQuota),
+         metaQuota: filterPersistableQuotaStates(state.metaQuota),
+         xaiQuota: filterPersistableQuotaStates(state.xaiQuota),
++        pluginQuota: filterPersistableQuotaStates(state.pluginQuota),
+       }),
+       merge: (persistedState, currentState) => {
+         const persisted = persistedState as Partial<QuotaStoreState> | undefined;
+@@ -220,6 +229,7 @@ export const useQuotaStore = create<QuotaStoreState>()(
+           kimiQuota: filterPersistableQuotaStates(persisted?.kimiQuota),
+           metaQuota: filterPersistableQuotaStates(persisted?.metaQuota),
+           xaiQuota: filterPersistableQuotaStates(persisted?.xaiQuota),
++          pluginQuota: filterPersistableQuotaStates(persisted?.pluginQuota),
+         };
+       },
+     }
+diff --git a/apps/web/src/features/accounts/model/pluginQuota.ts b/apps/web/src/features/accounts/model/pluginQuota.ts
+new file mode 100644
+--- /dev/null
++++ b/apps/web/src/features/accounts/model/pluginQuota.ts
+@@ -0,0 +1,98 @@
++import type { AuthFileItem, CredentialScopedQuotaState } from '@/types';
++import { apiClient, createScopedApiRequestConfig, type ApiClientRequestScope } from '@/services/api/client';
++import { isQuotaRefreshSupportedProvider } from '@/features/authFiles/constants';
++
++export interface PluginQuotaWindow {
++  id: string;
++  label: string;
++  group: string;
++  remainingPercent: number | null;
++  resetAtMs: number | null;
++  durationSeconds: number | null;
++  kind: 'five_hour' | 'daily' | 'weekly' | 'monthly' | 'unknown';
++}
++
++export interface PluginQuotaState extends CredentialScopedQuotaState {
++  status: 'loading' | 'success' | 'error';
++  windows: PluginQuotaWindow[];
++  planType: string | null;
++  error?: string;
++  errorStatus?: number;
++}
++
++const record = (value: unknown): Record<string, unknown> =>
++  typeof value === 'object' && value !== null && !Array.isArray(value)
++    ? value as Record<string, unknown> : {};
++const text = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
++
++export const isPluginQuotaFile = (file: AuthFileItem): boolean =>
++  !isQuotaRefreshSupportedProvider(text(file.provider || file.type)) &&
++  (file.supports_quota === true || file.supportsQuota === true) &&
++  Boolean(text(file.quota_provider || file.quotaProvider));
++
++const windowDuration = (name: string): Pick<PluginQuotaWindow, 'kind' | 'durationSeconds'> => {
++  if (/five[_ -]?hour|5\s*(?:小时|hours?)/i.test(name)) return { kind: 'five_hour', durationSeconds: 18000 };
++  if (/weekly|7\s*(?:天|days?)/i.test(name)) return { kind: 'weekly', durationSeconds: 604800 };
++  if (/monthly|30\s*(?:天|days?)/i.test(name)) return { kind: 'monthly', durationSeconds: 2592000 };
++  if (/daily|24\s*(?:小时|hours?)/i.test(name)) return { kind: 'daily', durationSeconds: 86400 };
++  return { kind: 'unknown', durationSeconds: null };
++};
++
++export const normalizePluginQuota = (
++  payload: unknown
++): Pick<PluginQuotaState, 'windows' | 'planType'> => {
++  const data = record(payload);
++  const windows: PluginQuotaWindow[] = [];
++  const groups = Array.isArray(data.groups) ? data.groups : [];
++  groups.forEach((rawGroup, groupIndex) => {
++    const group = record(rawGroup);
++    const groupLabel = text(group.displayName) || text(group.id) || `额度 ${groupIndex + 1}`;
++    const buckets = Array.isArray(group.buckets) ? group.buckets : [];
++    buckets.forEach((rawBucket, bucketIndex) => {
++      const bucket = record(rawBucket);
++      const name = text(bucket.window);
++      const label = text(bucket.description) || name || `${groupLabel} ${bucketIndex + 1}`;
++      const fraction = bucket.remainingFraction;
++      const reset = text(bucket.resetTime) ? Date.parse(text(bucket.resetTime)) : NaN;
++      windows.push({
++        id: `${groupIndex}:${name || bucketIndex}`,
++        label,
++        group: groupLabel,
++        remainingPercent: typeof fraction === 'number' && Number.isFinite(fraction) &&
++          fraction >= 0 && fraction <= 1 ? fraction * 100 : null,
++        resetAtMs: Number.isFinite(reset) && reset > 0 ? reset : null,
++        ...windowDuration(name),
++      });
++    });
++  });
++  return { windows, planType: text(record(data.subscription).plan) || null };
++};
++
++export const fetchPluginQuota = async (
++  file: AuthFileItem,
++  requestScope: ApiClientRequestScope
++): Promise<Pick<PluginQuotaState, 'windows' | 'planType'>> => {
++  const authIndex = file.authIndex ?? file.auth_index;
++  if (authIndex === null || authIndex === undefined || String(authIndex).trim() === '') {
++    throw new Error('凭证缺少 auth_index，请刷新凭证列表。');
++  }
++  let pluginId = text(file.quota_plugin_id || file.quotaPluginId);
++  if (!pluginId) {
++    const payload = await apiClient.get<{ plugins?: unknown[] }>(
++      '/plugins', createScopedApiRequestConfig(requestScope)
++    );
++    const provider = text(file.quota_provider || file.quotaProvider).toLowerCase();
++    const plugin = (payload.plugins ?? []).map(record).find((item) =>
++      item.registered === true && item.effective_enabled === true && item.supports_quota === true &&
++      (text(item.quota_provider).toLowerCase() === provider || text(item.id).toLowerCase() === provider)
++    );
++    pluginId = text(plugin?.id);
++  }
++  if (!pluginId) throw new Error('额度插件尚未就绪，请检查插件状态。');
++  const data = await apiClient.post<unknown>(
++    `/plugins/${encodeURIComponent(pluginId)}/quota`,
++    { auth_index: String(authIndex) },
++    createScopedApiRequestConfig(requestScope)
++  );
++  return normalizePluginQuota(data);
++};

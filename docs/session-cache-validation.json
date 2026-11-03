@@ -1,0 +1,250 @@
+{
+  "date": "2026-11-04",
+  "host": "CPA v8.0.52",
+  "host_source_revision": "6e6afab99a1939525ecb6bb1f0873c8e7a9df877",
+  "before": {
+    "phase": "before",
+    "date": "2026-11-03T17:41:54.635294+00:00",
+    "dll_sha256": "300217360363677bc9a17691a495d1a1b82aba97a1ead1693d0c9a46f5ca7b52",
+    "checks": [
+      {
+        "name": "不同原生 conversation 共用缓存键时仍隔离会话",
+        "passed": false
+      },
+      {
+        "name": "同一原生 conversation 跨轮次稳定",
+        "passed": true
+      },
+      {
+        "name": "缓存键共享不会改写原生 conversation",
+        "passed": true
+      },
+      {
+        "name": "同一会话切换缓存组时会话保持稳定",
+        "passed": true
+      },
+      {
+        "name": "同一会话保留两个显式缓存组的区别",
+        "passed": false
+      },
+      {
+        "name": "显式缓存组可跨独立会话共享",
+        "passed": false
+      },
+      {
+        "name": "只有缓存组不能把两个请求认作同一对话",
+        "passed": false
+      },
+      {
+        "name": "只有缓存组时仍保留缓存分组稳定性",
+        "passed": true
+      },
+      {
+        "name": "普通 user_id 不作为对话 ID",
+        "passed": false
+      },
+      {
+        "name": "不同调用方的会话与缓存隔离",
+        "passed": true
+      },
+      {
+        "name": "显式安全标识保持用户范围而非对话范围",
+        "passed": false
+      },
+      {
+        "name": "主会话内不同子代理隔离且可稳定续用",
+        "passed": true
+      },
+      {
+        "name": "Codex 同一根会话中的不同线程隔离",
+        "passed": true
+      },
+      {
+        "name": "原生上下文续接字段完整保留",
+        "passed": true
+      },
+      {
+        "name": "并发 16 个对话不会合并会话 ID",
+        "passed": false
+      },
+      {
+        "name": "并发请求的业务上下文各自完整",
+        "passed": true
+      },
+      {
+        "name": "anthropic 会话稳定并彼此隔离",
+        "passed": true
+      },
+      {
+        "name": "anthropic 业务消息不被其他会话替换",
+        "passed": true
+      },
+      {
+        "name": "chat 会话稳定并彼此隔离",
+        "passed": true
+      },
+      {
+        "name": "chat 业务消息不被其他会话替换",
+        "passed": true
+      },
+      {
+        "name": "Anthropic 缓存断点与 TTL 保留",
+        "passed": true
+      },
+      {
+        "name": "重启后同一会话标识保持稳定",
+        "passed": false
+      },
+      {
+        "name": "重启后显式缓存键和安全标识保持稳定",
+        "passed": false
+      },
+      {
+        "name": "不透明标识不包含下游名称或密钥",
+        "passed": true
+      }
+    ]
+  },
+  "after": {
+    "phase": "after",
+    "date": "2026-11-03T17:54:50.746142+00:00",
+    "dll_sha256": "4fa4338f4bc709e02cc2d74d8e5a3181926a5a0197bc5622d2ce41ae8be35010",
+    "checks": [
+      {
+        "name": "旧状态自动补充命名空间并保留原有账号",
+        "passed": true
+      },
+      {
+        "name": "不同原生 conversation 共用缓存键时仍隔离会话",
+        "passed": true
+      },
+      {
+        "name": "同一原生 conversation 跨轮次稳定",
+        "passed": true
+      },
+      {
+        "name": "缓存键共享不会改写原生 conversation",
+        "passed": true
+      },
+      {
+        "name": "同一会话切换缓存组时会话保持稳定",
+        "passed": true
+      },
+      {
+        "name": "同一会话保留两个显式缓存组的区别",
+        "passed": true
+      },
+      {
+        "name": "显式缓存组可跨独立会话共享",
+        "passed": true
+      },
+      {
+        "name": "只有缓存组不能把两个请求认作同一对话",
+        "passed": true
+      },
+      {
+        "name": "只有缓存组时仍保留缓存分组稳定性",
+        "passed": true
+      },
+      {
+        "name": "普通 user_id 不作为对话 ID",
+        "passed": true
+      },
+      {
+        "name": "不同调用方的会话与缓存隔离",
+        "passed": true
+      },
+      {
+        "name": "显式安全标识保持用户范围而非对话范围",
+        "passed": true
+      },
+      {
+        "name": "主会话内不同子代理隔离且可稳定续用",
+        "passed": true
+      },
+      {
+        "name": "Codex 同一根会话中的不同线程隔离",
+        "passed": true
+      },
+      {
+        "name": "原生上下文续接字段完整保留",
+        "passed": true
+      },
+      {
+        "name": "并发 16 个对话不会合并会话 ID",
+        "passed": true
+      },
+      {
+        "name": "并发请求的业务上下文各自完整",
+        "passed": true
+      },
+      {
+        "name": "anthropic 会话稳定并彼此隔离",
+        "passed": true
+      },
+      {
+        "name": "anthropic 业务消息不被其他会话替换",
+        "passed": true
+      },
+      {
+        "name": "chat 会话稳定并彼此隔离",
+        "passed": true
+      },
+      {
+        "name": "chat 业务消息不被其他会话替换",
+        "passed": true
+      },
+      {
+        "name": "Anthropic 缓存断点与 TTL 保留",
+        "passed": true
+      },
+      {
+        "name": "重启后同一会话标识保持稳定",
+        "passed": true
+      },
+      {
+        "name": "重启后显式缓存键和安全标识保持稳定",
+        "passed": true
+      },
+      {
+        "name": "不透明标识不包含下游名称或密钥",
+        "passed": true
+      }
+    ]
+  },
+  "existing_unit_tests": 6,
+  "temporary_unit_tests": 10,
+  "temporary_cleanup": {
+    "status": "blocked",
+    "reason": "自动审批策略拒绝删除操作；已核验的单文件绝对路径删除仍返回 blocked by policy，未提供更具体原因。",
+    "remaining_paths": [
+      "temp/audit-factory-sessions.py",
+      "temp/deliver-session-fix.py",
+      "temp/session-audit-before",
+      "temp/session-audit-before-complete",
+      "temp/session-audit-before-final",
+      "temp/session-audit-after-complete",
+      "temp/session-audit-after-final",
+      "temp/session-audit-after-migrated",
+      "temp/__pycache__/audit-factory-sessions.cpython-312.pyc"
+    ]
+  },
+  "real_upstream_context_isolation_verified": false,
+  "real_cache_hit_rate_measured": false,
+  "other_providers_evidence": "当前版本源码审查，未使用其他提供商的真实账号逐项验证",
+  "local_deployment": {
+    "at": "2026-11-03T18:02:01.994624+00:00",
+    "target": "http://127.0.0.1:60892",
+    "pid": 52324,
+    "installed_sha256": "4fa4338f4bc709e02cc2d74d8e5a3181926a5a0197bc5622d2ce41ae8be35010",
+    "tested_sha256": "4fa4338f4bc709e02cc2d74d8e5a3181926a5a0197bc5622d2ce41ae8be35010",
+    "health": "ready",
+    "namespace_persisted": true,
+    "accounts_preserved": true,
+    "auth_files_unchanged": true,
+    "models": 53,
+    "models_unchanged": true,
+    "uuid_models": 0,
+    "real_inference": false
+  }
+}

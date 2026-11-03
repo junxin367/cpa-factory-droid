@@ -357,8 +357,8 @@ impl Settings {
         {
             return Err(Fault::input("预算必须为空或非负有限数"));
         }
-        if self.models.is_empty() || self.models.len() > 100 {
-            return Err(Fault::input("模型数量必须为 1 至 100"));
+        if self.models.is_empty() || self.models.len() > 1024 {
+            return Err(Fault::input("模型数量必须为 1 至 1024"));
         }
         let mut ids = std::collections::HashSet::new();
         for m in &self.models {
@@ -569,49 +569,17 @@ pub struct Account {
 }
 impl Account {
     pub fn view(&self, state: &Store) -> Value {
-        let mut v = serde_json::to_value(self).unwrap_or(json!({}));
-        v.as_object_mut().unwrap().remove("deleted");
-        v.as_object_mut().unwrap().remove("revision");
-        v.as_object_mut().unwrap().remove("credential_fingerprint");
-        v["discovery"] = crate::access::discovery_view(self, state);
-        v["model_access"] = json!(state
-            .settings
-            .models
-            .iter()
-            .map(|m| crate::access::model_view(self, m, state))
-            .collect::<Vec<_>>());
-        v["validation_usage"] = state.usage_kind(Some(&self.id), Some("validation"));
-        v["selected_model_ids"] = json!(self.selected_models);
-        v["ready_model_count"] = json!(state.effective_models(&self.id).len());
-        v["pending_model_count"] = json!(self
-            .selected_models
-            .iter()
-            .filter(|id| !state
-                .effective_models(&self.id)
-                .iter()
-                .any(|m| &m.id == *id))
-            .count());
-        v["usage"] = state.usage(Some(&self.id));
-        v["prediction"] = state.prediction(&self.id, &self.official_limits);
-        if let Some(windows) = v["official_limits"]["windows"].as_array_mut() {
-            for window in windows {
-                window["period_stats"] = state.period_stats(&self.id, window);
-            }
-        }
-        v["plan"] = self.official_limits["plan"].clone();
-        v["model_prefix"] = json!(format!("factory/{}/", self.id));
-        v["pinned_models"] = json!(state
-            .effective_models(&self.id)
-            .iter()
-            .filter(|m| state
-                .published_models
-                .get(&self.id)
-                .is_some_and(|ids| ids.contains(&self.pinned_id(m))))
-            .map(|m| json!({
-            "id":self.pinned_id(m),
-            "base_id":m.id,"display_name":m.display_name}))
-            .collect::<Vec<_>>());
-        v
+        json!({
+            "id":self.id, "label":self.label, "kind":self.kind,
+            "enabled":self.enabled, "priority":self.priority,
+            "credential_hint":self.credential_hint, "auth_file":self.auth_file,
+            "status":self.status, "last_error":self.last_error,
+            "created_at":self.created_at, "updated_at":self.updated_at,
+            "last_checked_at":self.last_checked_at,
+            "ready_model_count":state.effective_models(&self.id).len(),
+            "model_source":self.discovery.source,
+            "catalog_checked_at":self.discovery.fetched_at
+        })
     }
     pub fn pinned_id(&self, model: &Model) -> String {
         let suffix = self
@@ -643,6 +611,7 @@ pub struct Store {
     pub ledger_retained_since: Option<String>,
     pub ledger_epoch: String,
     pub network_fingerprint: String,
+    pub(crate) wire_namespace: String,
     #[serde(default)]
     legacy_price_migration_completed: bool,
 }
@@ -662,6 +631,7 @@ impl Default for Store {
             ledger_retained_since: None,
             ledger_epoch: String::new(),
             network_fingerprint: String::new(),
+            wire_namespace: String::new(),
             legacy_price_migration_completed: false,
         }
     }
@@ -732,6 +702,13 @@ impl Store {
         }
         store.migrate_legacy_account_prices();
         store.settings.validate()?;
+        if store.wire_namespace.is_empty() {
+            store.wire_namespace = Uuid::new_v4().to_string();
+        } else if Uuid::parse_str(&store.wire_namespace).map_or(true, |value| value.is_nil()) {
+            return Err(Fault::storage(
+                "会话匿名化命名空间损坏，请从备份恢复插件状态",
+            ));
+        }
         if store.ledger_epoch.is_empty() {
             store.ledger_epoch = Uuid::new_v4().to_string();
             store.observation_started_at = Some(now());

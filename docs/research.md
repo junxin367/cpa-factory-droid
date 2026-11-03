@@ -4,7 +4,7 @@
 
 ## 结论与选择
 
-采用 CPA 原生 Rust 插件，默认由用户填写 Factory API Key，并通过 CPA 的 HTTP callback 直接访问 Droid 网关。这样可以复用 CPA 的凭据、代理、取消和 usage 集成，也避免引入常驻 CLI 子进程。
+采用 CPA 原生 Rust 插件，通过 CPA OAuth 登录或用户填写 Factory API Key 接入，并通过 CPA 的 HTTP callback 直接访问 Droid 网关。这样可以复用 CPA 的凭据、代理、取消和 usage 集成，也避免引入常驻 CLI 子进程。
 
 本版采用 strict native-only：模型配置显式决定 Messages、Responses 或 Chat 入口，仅允许同协议请求与响应，六种标准跨协议组合在 Factory 请求前拒绝。原生字段、工具 ID、签名和 SSE 保留，不使用协议转换器。CPA v8.0.52 更早的 HTTP handler 兼容修正及其他宿主改写仍是已知边界，详见 [原生协议与调用限制](protocol.md)。
 
@@ -12,7 +12,7 @@
 
 直接 HTTP 是 Droid 私有客户端契约，不是 Factory 公开承诺稳定的推理 API。模型请求先经身份接口解析区域及专属主机，再根据模型映射选择 Anthropic、Responses 或 Chat Completions 路径。账号实际能用哪些模型、Key 能否读取官方限额，都需要当前账号响应验证。
 
-设备码 OAuth 有 WorkOS 官方规范及多个客户端实现证据，但本版没有实现设备授权、组织范围恢复或 refresh token 轮换。SDK/CLI 推理桥只作为研究对照，本版不提供直接 HTTP 失败后的执行备用通道。
+已根据 WorkOS 官方规范接入设备码 OAuth、组织范围恢复和 refresh token 轮换；公开客户端 ID 与本机官方 Droid 原生二进制相符。真实设备授权接口已返回 Factory 官方登录地址，真实账号登录验收状态见 [OAuth 登录](oauth.md)。SDK/CLI 推理桥只作为研究对照，不提供直接 HTTP 失败后的执行备用通道。
 
 ## CPA 宿主与参考实现
 
