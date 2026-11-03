@@ -45,6 +45,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           node scripts/release.mjs registry
+          node scripts/release.mjs verify-manifest
           node scripts/release.mjs metadata
 
   build:

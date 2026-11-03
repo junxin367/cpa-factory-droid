@@ -58,6 +58,8 @@ jobs:
         run: node --check web/app.js
       - name: 检查插件注册表
         run: node scripts/release.mjs registry
+      - name: 检查更新清单
+        run: node scripts/release.mjs verify-manifest
       - name: 运行 Rust 测试
         run: cargo test --locked
       - name: 构建插件安装包

@@ -39,6 +39,8 @@ python -B scripts/verify-cpa.py --library target/x86_64-pc-windows-msvc/release/
 
 四个平台全部成功后，发布任务上传完整资产到草稿，再公开 Release；任一构建或宿主检查失败都不会首次公开该版本。正式发布状态以 GitHub 工作流及 Release 资产为准，不能以本机测试或标签已推送代替。
 
+更新清单中的发布页和下载链接按已校验的正式标签构造，不能直接保留 GitHub 草稿 API 返回的 `untagged-*` 地址。公开后另下载四个 ZIP，核对清单、ZIP/动态库 SHA256、对应宿主检查报告以及本机实装库的一致性。
+
 ## 验证边界
 
 - 真实 Factory OAuth 授权、真实推理和缓存命中率继续保持未验收，未代替用户完成登录。

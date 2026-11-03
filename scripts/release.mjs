@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -161,8 +162,7 @@ function checksums(directory, version) {
   writeFileSync(join(directory, "checksums.txt"), `${lines.join("\n")}\n`);
 }
 
-function manifest(input, output) {
-  const release = JSON.parse(readFileSync(input, "utf8"));
+function releaseManifest(release) {
   const version = parseTag(release.tagName);
   const expected = [...assetsFor(version), "checksums.txt"];
   const files = (release.assets ?? []).filter((asset) => expected.includes(asset.name));
@@ -171,14 +171,45 @@ function manifest(input, output) {
     if (matches.length !== 1 || !matches[0].url) throw new Error(`Release 缺少唯一的可下载产物：${name}`);
   }
   if (!release.url) throw new Error("Release 缺少页面地址。");
-  const payload = {
+  return {
     version: `v${version}`,
     // Draft html_url may use an untagged URL; the published address is fixed.
     url: `https://github.com/${repository}/releases/tag/${release.tagName}`,
     body: release.body ?? "",
-    assets: files.map(({ name, url }) => ({ name, url })).sort((a, b) => a.name.localeCompare(b.name)),
+    // Draft asset URLs also contain untagged-*; publish only stable tag URLs.
+    assets: files.map(({ name }) => ({
+      name,
+      url: `https://github.com/${repository}/releases/download/${encodeURIComponent(release.tagName)}/${encodeURIComponent(name)}`,
+    })).sort((a, b) => a.name.localeCompare(b.name)),
   };
+}
+
+function manifest(input, output) {
+  const payload = releaseManifest(JSON.parse(readFileSync(input, "utf8")));
   writeFileSync(output, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function verifyManifest() {
+  const version = "0.1.1";
+  const tagName = `v${version}`;
+  const names = [...assetsFor(version), "checksums.txt"];
+  const source = (ref) => ({
+    tagName, body: "发布说明",
+    url: `https://github.com/${repository}/releases/tag/${ref}`,
+    assets: names.map((name) => ({
+      name, url: `https://github.com/${repository}/releases/download/${ref}/${name}`,
+    })),
+  });
+  const draft = source("untagged-draft-example");
+  const payload = releaseManifest(draft);
+  assert.deepEqual(payload, releaseManifest(source(tagName)));
+  assert.equal(payload.url, `https://github.com/${repository}/releases/tag/v0.1.1`);
+  assert.equal(payload.assets.length, 5);
+  assert(payload.assets.every(({ name, url }) =>
+    url === `https://github.com/${repository}/releases/download/v0.1.1/${name}`));
+  assert.throws(() => releaseManifest({ ...draft, assets: draft.assets.slice(1) }), /缺少/);
+  assert.throws(() => releaseManifest({ ...draft, assets: [...draft.assets, draft.assets[0]] }), /唯一/);
+  process.stdout.write("更新清单检查通过：草稿与公开地址一致，四平台完整性与重复资产检查通过。\n");
 }
 
 function notes(tag) {
@@ -225,6 +256,7 @@ switch (command) {
   case "registry": registry(); break;
   case "checksums": checksums(...args); break;
   case "manifest": manifest(...args); break;
+  case "verify-manifest": verifyManifest(); break;
   case "notes": notes(...args); break;
-  default: throw new Error("用法：node scripts/release.mjs metadata|registry|snapshot|local <ZIP> <target> <source-sha256> <library-sha256>|checksums <目录> <版本>|manifest <release.json> <输出>|notes <标签>");
+  default: throw new Error("用法：node scripts/release.mjs metadata|registry|snapshot|verify-manifest|local <ZIP> <target> <source-sha256> <library-sha256>|checksums <目录> <版本>|manifest <release.json> <输出>|notes <标签>");
 }
