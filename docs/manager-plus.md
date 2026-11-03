@@ -61,7 +61,7 @@ Manager Full Mode 的采集器消费 CPA `usage-queue` 并写入自己的数据�
 
 请求统计依赖 CPA 正确发布 usage、Manager 采集正常和稳定 auth 索引。Factory executor 返回对应原生协议的 usage；三类协议的输入与缓存口径须分别核对，不能把 Anthropic 的原始 input 当作已经包含缓存。本机验收范围见验证记录，真实 Factory 上游缺失 usage 仍按未知处理。
 
-显式基础测试直接写插件账本为 validation，不伪造或重复发布业务 usage；因此不能预期 Manager 的业务历史会自动包含插件验证明细。账号卡片按周期展示已记录 M / USD 与预测总量，隐藏 Droid Core 5 小时行；后端 `/usage?kind=validation` 和 `/settings` 继续提供验证统计与预算 API，不对应独立页面 Tab。partial 覆盖与 v2 预测口径见 [用量说明](usage.md)。
+显式基础测试直接写插件账本为 validation，不伪造或重复发布业务 usage；因此不能预期 Manager 的业务历史会自动包含插件验证明细。账号卡片按周期展示已记录 M / USD 与预测总量，隐藏所有 Droid Core 额度周期及对应预测；后端 `/usage?kind=validation` 和 `/settings` 继续提供验证统计与预算 API，不对应独立页面 Tab。partial 覆盖与 v2 预测口径见 [用量说明](usage.md)。
 
 ## 对照源码
 

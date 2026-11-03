@@ -49,7 +49,7 @@ API Key 能否读取官方接口以本次响应为准。无权限、查询失败
 
 主行已用 USD 仅在 `status=available`、`cost_complete=true` 且 `estimated_cost_usd` 有效时展示，缺价只显示“—”。主行 M 还要求 `usage_complete=true`、没有缺 usage 或无效时间记录，否则为“—”。预测必须对应同一账号/池/官方周期且状态为 estimated，缺失的费用或 M 分别显示“—”。
 
-覆盖 partial 时，记录本身完整的数值仍可展示，覆盖和已知小计字段保留在 API。蓝色显示已用，紫色显示预计总量；`group=core` 且 `window_key=fiveHour` 的 Droid Core 5 小时行隐藏，后端统计和预测字段保留。
+覆盖 partial 时，记录本身完整的数值仍可展示，覆盖和已知小计字段保留在 API。蓝色显示已用，紫色显示预计总量；所有 `group=core` 的 Droid Core 额度周期及对应预测均隐藏，后端统计和预测字段保留。
 
 窗口边界必须来自官方明确起止时间，或来自可信机器窗口键对应的时长；只知道重置时间、显示名称或一段人类描述，不足以猜完整周期。边界未知、未开始或已过期时，统计状态为 unknown，数字为 null。
 

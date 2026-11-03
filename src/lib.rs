@@ -5,6 +5,7 @@ mod factory;
 mod guard;
 pub mod host;
 mod management;
+mod pricing;
 mod protocol;
 mod quota_window_usage;
 mod state;

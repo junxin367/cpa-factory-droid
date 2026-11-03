@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     access::{DiscoveryState, ModelAccess},
+    pricing::{Price, PriceRule},
     Fault, Result, PROVIDER,
 };
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -24,19 +25,15 @@ pub struct ModelOverride {
     pub cache_write_price_usd_per_million: Option<f64>,
 }
 impl ModelOverride {
-    pub fn apply(&self, model: &mut Model) {
-        if self.input_price_usd_per_million.is_some() {
-            model.input_price_usd_per_million = self.input_price_usd_per_million;
-        }
-        if self.output_price_usd_per_million.is_some() {
-            model.output_price_usd_per_million = self.output_price_usd_per_million;
-        }
-        if self.cache_read_price_usd_per_million.is_some() {
-            model.cache_read_price_usd_per_million = self.cache_read_price_usd_per_million;
-        }
-        if self.cache_write_price_usd_per_million.is_some() {
-            model.cache_write_price_usd_per_million = self.cache_write_price_usd_per_million;
-        }
+    fn has_legacy_prices(&self) -> bool {
+        [
+            self.input_price_usd_per_million,
+            self.output_price_usd_per_million,
+            self.cache_read_price_usd_per_million,
+            self.cache_write_price_usd_per_million,
+        ]
+        .into_iter()
+        .any(|price| price.is_some())
     }
     pub fn validate(&self) -> Result<()> {
         if self.alias.as_ref().is_some_and(|s| {
@@ -62,6 +59,9 @@ impl ModelOverride {
             if !price.is_finite() || !(0.0..=1_000_000.0).contains(&price) {
                 return Err(Fault::input("模型价格须为非负有限数或null继承全局"));
             }
+        }
+        if self.has_legacy_prices() {
+            return Err(Fault::input("模型价格请在全局模型设置中统一维护"));
         }
         Ok(())
     }
@@ -101,6 +101,7 @@ pub struct Model {
     pub cache_read_price_usd_per_million: Option<f64>,
     pub cache_write_price_usd_per_million: Option<f64>,
     pub quota_pool: String,
+    pub price_rules: Vec<PriceRule>,
     pub quota_pool_source: String,
 }
 impl Default for Model {
@@ -124,11 +125,22 @@ impl Default for Model {
             cache_read_price_usd_per_million: None,
             cache_write_price_usd_per_million: None,
             quota_pool: "unknown".into(),
+            price_rules: Vec::new(),
             quota_pool_source: "unknown".into(),
         }
     }
 }
 impl Model {
+    pub fn price(&self) -> Price {
+        Price {
+            input: self.input_price_usd_per_million,
+            output: self.output_price_usd_per_million,
+            cache_read: self.cache_read_price_usd_per_million,
+            cache_write: self.cache_write_price_usd_per_million,
+            rules: self.price_rules.clone(),
+        }
+    }
+
     pub fn host_json(&self) -> Value {
         json!({"ID":self.id,"Object":"model","OwnedBy":"factory","Type":PROVIDER,
             "DisplayName":self.display_name,"Name":self.id,
@@ -412,6 +424,9 @@ impl Settings {
                     return Err(Fault::input("模型倍率与价格必须为非负有限数"));
                 }
             }
+            m.price()
+                .validate()
+                .map_err(|message| Fault::input(&message))?;
         }
         Ok(())
     }
@@ -449,6 +464,21 @@ pub struct UsageTokens {
     pub cache_write: u64,
     #[serde(default)]
     pub reasoning: u64,
+}
+fn service_tier_for_record<'a>(host_record: &'a Value, model: &Model) -> Option<&'a str> {
+    host_record["ResponseServiceTier"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            host_record["ServiceTier"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            crate::catalog::required_parameter(model).and_then(|(key, value)| {
+                ((key == "service_tier") || (key == "speed" && value == "fast")).then_some(value)
+            })
+        })
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LedgerEntry {
@@ -613,6 +643,8 @@ pub struct Store {
     pub ledger_retained_since: Option<String>,
     pub ledger_epoch: String,
     pub network_fingerprint: String,
+    #[serde(default)]
+    legacy_price_migration_completed: bool,
 }
 impl Default for Store {
     fn default() -> Self {
@@ -630,10 +662,61 @@ impl Default for Store {
             ledger_retained_since: None,
             ledger_epoch: String::new(),
             network_fingerprint: String::new(),
+            legacy_price_migration_completed: false,
         }
     }
 }
 impl Store {
+    fn migrate_legacy_account_prices(&mut self) {
+        if self.legacy_price_migration_completed {
+            return;
+        }
+        for model in &mut self.settings.models {
+            if [
+                model.input_price_usd_per_million,
+                model.output_price_usd_per_million,
+                model.cache_read_price_usd_per_million,
+                model.cache_write_price_usd_per_million,
+            ]
+            .into_iter()
+            .any(|price| price.is_some())
+            {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            for account in self.accounts.values() {
+                let Some(override_) = account.model_overrides.get(&model.id) else {
+                    continue;
+                };
+                let prices = [
+                    override_.input_price_usd_per_million,
+                    override_.output_price_usd_per_million,
+                    override_.cache_read_price_usd_per_million,
+                    override_.cache_write_price_usd_per_million,
+                ];
+                if prices.iter().any(Option::is_some) && !candidates.contains(&prices) {
+                    candidates.push(prices);
+                }
+            }
+            if candidates.len() != 1 {
+                continue;
+            }
+            let [input, output, cache_read, cache_write] = candidates[0];
+            if ![input, output, cache_read, cache_write]
+                .into_iter()
+                .flatten()
+                .all(|price| price.is_finite() && (0.0..=1_000_000.0).contains(&price))
+            {
+                continue;
+            }
+            model.input_price_usd_per_million = input;
+            model.output_price_usd_per_million = output;
+            model.cache_read_price_usd_per_million = cache_read;
+            model.cache_write_price_usd_per_million = cache_write;
+        }
+        self.legacy_price_migration_completed = true;
+    }
+
     pub fn open(dir: PathBuf) -> Result<Arc<Mutex<Self>>> {
         fs::create_dir_all(&dir).map_err(|_| Fault::storage("无法创建插件数据目录"))?;
         let path = dir.join("state.json");
@@ -647,6 +730,7 @@ impl Store {
         if store.version != 1 {
             return Err(Fault::storage("插件状态版本不受支持"));
         }
+        store.migrate_legacy_account_prices();
         store.settings.validate()?;
         if store.ledger_epoch.is_empty() {
             store.ledger_epoch = Uuid::new_v4().to_string();
@@ -749,27 +833,10 @@ impl Store {
                 .input
                 .saturating_sub(t.cached)
                 .saturating_sub(t.cache_write);
-            let input = if uncached > 0 {
-                uncached as f64 * model.input_price_usd_per_million?
-            } else {
-                0.0
-            };
-            let output = if t.output > 0 {
-                t.output as f64 * model.output_price_usd_per_million?
-            } else {
-                0.0
-            };
-            let read = if t.cached > 0 {
-                t.cached as f64 * model.cache_read_price_usd_per_million?
-            } else {
-                0.0
-            };
-            let write = if t.cache_write > 0 {
-                t.cache_write as f64 * model.cache_write_price_usd_per_million?
-            } else {
-                0.0
-            };
-            Some((input + output + read + write) / 1_000_000.0)
+            let tier = service_tier_for_record(host_record, model);
+            model
+                .price()
+                .cost(uncached, t.output, t.cached, t.cache_write, tier)
         });
         let at = host_record["RequestedAt"]
             .as_str()
@@ -1105,5 +1172,99 @@ impl Store {
         json!({"status":if estimated{"estimated"}else{"unknown"},"scope":"同账号、同官方额度池及同一滚动窗口；仅本插件样本",
             "unit":"原始输入+输出 token（缓存已包含于输入）","estimated":true,"windows":windows,
             "message":"这是样本推算，不是官方 token 余额或官方美元余额；FSC 消耗不参与推算"})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with_legacy_prices(first: Option<f64>, second: Option<f64>) -> Store {
+        let mut store = Store::default();
+        let model_id = "factory/test".to_string();
+        store.settings.models = vec![Model {
+            id: model_id.clone(),
+            ..Model::default()
+        }];
+        for (id, input) in [("first", first), ("second", second)] {
+            store.accounts.insert(
+                id.into(),
+                Account {
+                    id: id.into(),
+                    model_overrides: BTreeMap::from([(
+                        model_id.clone(),
+                        ModelOverride {
+                            input_price_usd_per_million: input,
+                            output_price_usd_per_million: Some(50.0),
+                            ..ModelOverride::default()
+                        },
+                    )]),
+                    ..Account::default()
+                },
+            );
+        }
+        store
+    }
+
+    #[test]
+    fn unique_legacy_price_is_promoted_once_without_data_loss() {
+        let mut store = store_with_legacy_prices(Some(10.0), Some(10.0));
+        store.migrate_legacy_account_prices();
+        assert_eq!(
+            store.settings.models[0].input_price_usd_per_million,
+            Some(10.0)
+        );
+        assert!(store
+            .accounts
+            .values()
+            .all(|account| account.model_overrides["factory/test"]
+                .input_price_usd_per_million
+                .is_some()));
+        store.settings.models[0].input_price_usd_per_million = None;
+        store.migrate_legacy_account_prices();
+        assert_eq!(store.settings.models[0].input_price_usd_per_million, None);
+    }
+
+    #[test]
+    fn conflicting_legacy_prices_remain_preserved_without_promotion() {
+        let mut store = store_with_legacy_prices(Some(10.0), Some(20.0));
+        store.migrate_legacy_account_prices();
+        assert_eq!(store.settings.models[0].input_price_usd_per_million, None);
+        assert_eq!(
+            store.accounts["first"].model_overrides["factory/test"].input_price_usd_per_million,
+            Some(10.0)
+        );
+        assert_eq!(
+            store.accounts["second"].model_overrides["factory/test"].input_price_usd_per_million,
+            Some(20.0)
+        );
+    }
+
+    #[test]
+    fn actual_service_tier_precedes_route_fallback() {
+        let model = Model {
+            protocol: "responses".into(),
+            upstream_provider: "openai".into(),
+            upstream_id: "gpt-5.4-fast".into(),
+            ..Model::default()
+        };
+        assert_eq!(
+            service_tier_for_record(
+                &json!({"ResponseServiceTier":"standard","ServiceTier":"flex"}),
+                &model
+            ),
+            Some("standard")
+        );
+        assert_eq!(
+            service_tier_for_record(
+                &json!({"ResponseServiceTier":"","ServiceTier":"flex"}),
+                &model
+            ),
+            Some("flex")
+        );
+        assert_eq!(
+            service_tier_for_record(&json!({}), &model),
+            Some("priority")
+        );
     }
 }

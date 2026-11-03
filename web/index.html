@@ -15,7 +15,7 @@
     <header class="page-header">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M8 10h17M8 16h12M8 22h7" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="m23 20 4 4-4 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-        <div><div class="eyebrow">CPA 插件</div><h1>Factory Droid <span id="version" class="version">版本待连接</span></h1><p class="header-description">统一管理 Factory 账号、模型与使用情况</p></div>
+        <div><div class="eyebrow">CPA 插件</div><h1>Factory Droid <span id="version" class="version">版本待连接</span></h1></div>
       </div>
       <div class="header-actions">
         <span id="connection-status" class="connection-status"><span class="status-dot"></span><span>尚未授权</span></span>
@@ -32,8 +32,8 @@
 
       <section id="view-accounts" class="view" aria-labelledby="accounts-title">
         <div class="section-toolbar">
-          <div><h2 id="accounts-title">Factory 账号 <span id="account-count" class="tab-count">—</span></h2><p id="accounts-subtitle" class="muted">通过 API Key 连接 Factory，为 CPA 提供模型服务。</p></div>
-          <button id="add-account" class="button button-primary" type="button" disabled><span data-icon="plus"></span>新建</button>
+          <div><h2 id="accounts-title">Factory 账号 <span id="account-count" class="tab-count">—</span></h2><p id="accounts-subtitle" class="muted" hidden></p></div>
+          <div class="toolbar-actions"><button id="manage-models" class="button button-secondary" type="button" disabled><span data-icon="grid"></span>模型与价格</button><button id="add-account" class="button button-primary" type="button" disabled><span data-icon="plus"></span>新建</button></div>
         </div>
         <div class="filter-bar">
           <label class="search-field"><span data-icon="search"></span><span class="sr-only">搜索账号</span><input id="account-search" type="search" placeholder="搜索账号名称或邮箱" autocomplete="off"></label>
@@ -41,12 +41,11 @@
           <div id="account-summary" class="filter-summary">连接后显示账号状态</div>
         </div>
         <div id="accounts-grid" class="accounts-grid" aria-live="polite"></div>
-        <div class="page-footnote"><span data-icon="info"></span><span>官方额度与官方消耗按 Factory 接口实际返回值展示；本地用量只记录经过本插件的请求，未知数据不会显示为零。</span></div>
       </section>
 
       <section id="view-usage" class="view" aria-labelledby="usage-title" hidden inert>
         <div class="section-toolbar">
-          <div><h2 id="usage-title">用量与预算</h2><p class="muted">官方记录与本地估算分别展示，统计周期采用 UTC。</p></div>
+          <div><h2 id="usage-title">用量与预算</h2></div>
           <div class="usage-filters"><label class="scope-field"><span>统计范围</span><select id="usage-account" disabled><option value="">全部账号</option></select></label><label class="scope-field"><span>请求类型</span><select id="usage-kind" disabled><option value="all">全部请求（含验证）</option><option value="inference">业务调用</option><option value="validation">基础验证</option></select></label></div>
         </div>
         <div id="usage-window" class="period-label"><span data-icon="calendar"></span><span>统计周期待连接</span></div>
@@ -81,11 +80,11 @@
       </section>
 
       <section id="view-models" class="view" aria-labelledby="models-title" hidden inert>
-        <div class="section-toolbar"><div><h2 id="models-title">模型与账号允许</h2><p class="muted">模型定义、账号基础验证与允许、CPA 实际发布分别管理。</p></div><div id="definition-actions" class="toolbar-actions" hidden><button id="add-model" class="button button-secondary" type="button" disabled><span data-icon="plus"></span>添加映射</button><button id="save-models" class="button button-primary" type="button" disabled>保存修改</button></div></div>
-        <div class="model-section-tabs" role="group" aria-label="模型管理内容"><button id="model-section-access" class="button button-soft" type="button" data-model-section="access" aria-pressed="true">账号模型允许</button><button id="model-section-definitions" class="button button-quiet" type="button" data-model-section="definitions" aria-pressed="false">模型定义与估算</button></div>
+        <div class="section-toolbar"><div><h2 id="models-title">模型管理</h2></div><div id="definition-actions" class="toolbar-actions" hidden><button id="add-model" class="button button-secondary" type="button" disabled><span data-icon="plus"></span>添加映射</button><button id="save-models" class="button button-primary" type="button" disabled>保存修改</button></div></div>
+        <div class="model-section-tabs" role="group" aria-label="模型管理内容"><button id="model-section-access" class="button button-soft" type="button" data-model-section="access" aria-pressed="true">账号模型</button><button id="model-section-definitions" class="button button-quiet" type="button" data-model-section="definitions" aria-pressed="false">模型与价格</button></div>
         <section id="model-access-section" aria-labelledby="model-access-title">
           <div class="panel access-toolbar-panel">
-            <div class="access-toolbar"><label class="scope-field"><span>选择账号</span><select id="model-account" disabled><option value="">请选择账号</option></select></label><div class="toolbar-actions"><button id="reload-account-models" class="button button-secondary" type="button" disabled><span data-icon="refresh"></span>刷新状态</button><button id="refresh-discovery" class="button button-secondary" type="button" disabled><span data-icon="grid"></span>刷新候选目录</button><button id="reconcile-models" class="button button-secondary" type="button" disabled>重试发布同步</button></div></div>
+            <div class="access-toolbar"><label class="scope-field"><span>选择账号</span><select id="model-account" disabled><option value="">请选择账号</option></select></label><div class="toolbar-actions"><button id="reload-account-models" class="button button-secondary" type="button" disabled><span data-icon="refresh"></span>刷新状态</button><button id="refresh-discovery" class="button button-secondary" type="button" disabled><span data-icon="grid"></span>刷新候选目录</button><button id="reconcile-models" class="button button-secondary" type="button" disabled>重试发布同步</button><button id="account-add-route" class="button button-secondary" type="button">添加映射</button></div></div>
             <h3 id="model-access-title">当前账号的模型状态</h3>
             <p class="muted access-explanation">读取候选目录不证明账号有权调用。只有你主动完成基础验证并允许的模型才可发布；“已发布”以服务端确认的 CPA 实际状态为准。</p>
             <div id="access-summary" class="access-summary"></div>
@@ -110,8 +109,7 @@
         <details id="pinned-model-panel" class="panel pinned-panel" hidden><summary>固定账号模型 ID <span class="muted">可选：让请求固定使用一个账号</span></summary><div class="pinned-panel-body"><p class="muted">共享模型按 CPA 路由选择账号；固定账号模型用于指定账号。两者支持的原生协议和调用端点相同，均以模型配置为准。</p><label class="scope-field"><span>选择账号</span><select id="pinned-account"></select></label><div id="pinned-model-list" class="pinned-model-list"></div></div></details>
         <div class="filter-bar"><label class="search-field"><span data-icon="search"></span><span class="sr-only">搜索模型</span><input id="model-search" type="search" placeholder="搜索模型名称或 ID" autocomplete="off"></label><span id="model-count" class="filter-summary">连接后显示模型目录</span><span id="models-unsaved" class="badge badge-warning" hidden>有未保存的修改</span></div>
         <div id="model-error" class="notice notice-error" role="alert" hidden></div>
-        <div class="panel model-table-panel"><div class="table-scroll"><table class="model-table"><thead><tr><th scope="col">模型 / CPA 模型 ID</th><th scope="col">路由状态</th><th scope="col">输入倍率</th><th scope="col">输出倍率</th><th scope="col">缓存读取倍率</th><th scope="col">缓存写入倍率</th><th scope="col">输入单价 <span>USD / 百万 token</span></th><th scope="col">输出单价 <span>USD / 百万 token</span></th><th scope="col">缓存读取单价 <span>USD / 百万 token</span></th><th scope="col">缓存写入单价 <span>USD / 百万 token</span></th><th scope="col">启用</th></tr></thead><tbody id="model-rows"></tbody></table></div></div>
-        <div class="page-footnote"><span data-icon="info"></span><span>启用模型定义不等于账号已验证或已发布。发布状态来自 CPA 实际注册结果；账号仍需逐个模型基础验证并允许。缓存读写单价未配置时，涉及缓存的美元费用保持未知。</span></div>
+        <div class="panel model-table-panel"><div class="table-scroll"><table class="model-table"><thead><tr><th scope="col">模型 / CPA 模型 ID</th><th scope="col">路由状态</th><th scope="col">输入倍率</th><th scope="col">输出倍率</th><th scope="col">缓存读取倍率</th><th scope="col">缓存写入倍率</th><th scope="col">模型价格 <span>USD / 百万 token</span></th><th scope="col">启用</th></tr></thead><tbody id="model-rows"></tbody></table></div></div>
         </div>
       </section>
 
@@ -119,7 +117,7 @@
         <div class="section-toolbar"><div><h2 id="help-title">使用帮助</h2><p class="muted">从连接账号开始，了解每项数据的来源和边界。</p></div><span class="badge badge-brand">Factory Droid</span></div>
         <div class="help-grid">
           <section class="panel"><span class="help-number">01</span><h3>安装与管理授权</h3><p>在 CPA 插件管理中安装并启用 Factory Droid，再从插件菜单打开本页面。静态页面可直接打开，管理接口仍由管理器鉴权保护。</p><p>同源部署时优先复用管理器已保存的会话；未保存或无法复用时，点击“管理授权”输入当前管理器密钥。直连 CPA 使用 CPA 管理 Key；CPAMP Full Mode 使用当前 Admin Key。</p><p class="muted">本插件不会另行保存密钥。不要在管理授权中输入 Factory API Key；Factory 凭据只在“添加账号”时填写。</p></section>
-          <section class="panel"><span class="help-number">02</span><h3>连接账号与选择允许模型</h3><p>在添加弹窗填写名称与 Factory API Key，获取候选后多选模型，设置本账号的调用别名与估算价格，再按需测试。创建前凭据仅保留在有时效的服务端内存草稿，关闭弹窗会清除草稿。</p><p>可先以零模型或待验证模型创建账号查看额度；只有基础验证有效的模型才会发布。测试每个模型发送一次固定短请求，最多 128 输出 Token，会消耗额度；只证明该次基础调用成功，不证明工具、图像等全部能力。</p><p class="muted">本账号别名只改变固定账号模型 ID，价格覆盖只影响此账号。刷新、获取候选与重试同步均不发送推理；修改别名、价格及创建账号不会重复测试。</p></section>
+          <section class="panel"><span class="help-number">02</span><h3>连接账号与选择允许模型</h3><p>在添加弹窗填写名称与 Factory API Key，获取候选后多选模型，设置本账号的调用别名，再按需测试。创建前凭据仅保留在有时效的服务端内存草稿，关闭弹窗会清除草稿。</p><p>可先以零模型或待验证模型创建账号查看额度；只有基础验证有效的模型才会发布。测试每个模型发送一次固定短请求，最多 128 输出 Token，会消耗额度；只证明该次基础调用成功，不证明工具、图像等全部能力。</p><p class="muted">本账号别名只改变固定账号模型 ID。所有模型价格在“模型与价格”中统一维护，账号不再单独覆盖价格。</p></section>
           <section class="panel"><span class="help-number">03</span><h3>官方额度、FSC 与本地估算</h3><p><strong>官方额度：</strong>Factory Billing Limits 返回的实际额度窗口、剩余百分比与重置时间；仅展示接口已提供的窗口。无权限或查询失败时说明原因，不补造余额。</p><p><strong>官方消耗：</strong>Factory Analytics 返回的已使用 FSC，按实际周期展示。它与本地加权 token 不是同一个单位。</p><p><strong>本地估算：</strong>根据插件收到的 token usage 与模型倍率计算。美元费用仅在配置了对应单价且数据足够时显示，不能作为官方账单。</p></section>
           <section class="panel"><span class="help-number">04</span><h3>统计、预算与候选目录</h3><p><strong>历史用量：</strong>业务调用和基础验证分别记录；可按请求类型筛选。全局预算包含两者的消耗，失败验证也会记录，缺少上游 usage 时不会补造 token。</p><p><strong>候选目录：</strong>官方 CLI 只提供候选，读取成功或显示候选数量不代表账号有模型权限。目录过期、读取失败及明确禁用项会单独标记；没有明确路由的候选不会自动加入模型定义。</p><p><strong>模型路由：</strong>不配置 <code>droid-cli-path</code> 仍可对已配置原生路由手工基础验证。固定账号模型是可选路由，只列出实际生效并发布的模型，其原生协议与共享模型相同。</p></section>
         </div>
@@ -138,12 +136,12 @@
     <form id="account-form">
       <div class="dialog-heading"><span class="dialog-icon" data-icon="key"></span><button id="close-account-dialog" class="button button-quiet icon-button" type="button" data-close="account-dialog" aria-label="关闭新建账号抽屉"><span data-icon="close"></span></button></div>
       <h2 id="account-dialog-title">新建 Factory 账号</h2>
-      <p id="account-dialog-description" class="muted">模型和测试均可稍后配置，也可直接创建账号查看额度。</p>
+      <p id="account-dialog-description" class="muted" hidden></p>
       <div id="account-form-scroll" class="account-form-scroll">
         <div id="account-credentials" class="account-credentials">
           <label>账号名称<input id="account-label" type="text" maxlength="80" required placeholder="例如：团队 Factory" autocomplete="off"></label>
           <div id="account-key-field"><label>Factory API Key<input id="account-key" type="password" autocomplete="off" spellcheck="false" placeholder="输入你的 Factory API Key" maxlength="8192"></label><p id="account-key-hint" class="form-hint">仅发送到当前 CPA 服务，不在浏览器保存。</p><div id="draft-key-status" class="notice notice-info compact" role="status" hidden></div></div>
-          <div id="account-settings-fields" hidden><label>优先级<input id="account-priority" type="number" min="-100" max="100" step="1" value="0"></label><p class="form-hint">范围 −100 到 100，数值较高的账号由 CPA 优先选择。</p></div>
+          <div id="account-settings-fields" hidden><label>优先级<input id="account-priority" type="number" min="-100" max="100" step="1" value="0" title="数值较高的账号优先"></label></div>
           <label class="checkbox-label"><input id="account-enabled" type="checkbox" checked><span>启用此账号</span></label>
         </div>
         <section id="account-draft-workspace" class="account-draft-workspace" aria-label="获取与选择模型">
@@ -154,7 +152,7 @@
         </section>
         <section id="draft-test-section" class="draft-test-section" aria-labelledby="draft-test-title">
           <h3 id="draft-test-title">连通性测试 <span class="muted">可选</span></h3>
-          <p id="draft-cost-description" class="form-hint">测试会消耗额度，每个模型最多 128 输出 Token。获取模型和创建不会自动测试。</p>
+          <p id="draft-cost-description" class="form-hint" hidden></p>
           <label class="checkbox-label draft-confirmation"><input id="draft-test-confirmation" type="checkbox"><span>我确认发送会消耗额度的基础测试请求</span></label>
           <div class="draft-test-controls"><label class="sr-only" for="draft-test-model">选择测试模型</label><select id="draft-test-model" disabled><option value="">先添加模型</option></select><button id="draft-test-models" class="button button-secondary" type="button" disabled>测试</button></div>
           <div id="draft-test-summary" class="draft-test-summary" role="status"></div>
@@ -167,7 +165,6 @@
 
   <dialog id="draft-candidate-dialog" class="model-picker-dialog" aria-labelledby="draft-picker-title">
     <div class="dialog-heading"><h2 id="draft-picker-title">选择 Factory 模型</h2><button class="button button-quiet icon-button" type="button" data-close="draft-candidate-dialog" aria-label="关闭候选模型选择"><span data-icon="close"></span></button></div>
-    <p class="muted">选择要添加的模型。CLI 未返回的已配置模型标记为“待验证”，调用权限以测试结果为准。</p>
     <div id="draft-model-picker" class="draft-model-picker">
       <div class="draft-candidates">
         <label class="draft-picker-search"><span>搜索模型</span><input id="draft-candidate-search" type="search" placeholder="按模型 ID、名称或别名筛选" autocomplete="off"></label>
@@ -178,18 +175,49 @@
     <div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="draft-candidate-dialog">取消</button><button id="draft-picker-apply" class="button button-primary" type="button" disabled>添加所选模型</button></div>
   </dialog>
 
-  <dialog id="account-models-dialog" class="side-drawer" aria-labelledby="account-models-title">
-    <div class="dialog-heading"><button class="button button-quiet icon-button" type="button" data-close="account-models-dialog" aria-label="关闭账号模型管理"><span data-icon="close"></span></button><h2 id="account-models-title">账号模型管理</h2></div>
-    <div id="account-models-content" class="side-drawer-content"></div>
-    <div class="dialog-footer"><button id="account-add-route" class="button button-secondary" type="button">添加明确路由</button><button class="button button-secondary push-right" type="button" data-close="account-models-dialog">关闭</button></div>
+  <dialog id="global-models-dialog" class="side-drawer global-models-dialog" aria-labelledby="global-models-title">
+    <div class="dialog-heading"><button class="button button-quiet icon-button" type="button" data-close="global-models-dialog" aria-label="关闭模型与价格"><span data-icon="close"></span></button><h2 id="global-models-title">模型与价格</h2></div>
+    <div id="global-models-content" class="side-drawer-content"></div>
+    <div class="dialog-footer"><div id="global-models-actions" class="toolbar-actions"></div><button class="button button-secondary push-right" type="button" data-close="global-models-dialog">关闭</button></div>
   </dialog>
 
+
   <dialog id="delete-dialog" class="small-dialog" aria-labelledby="delete-title"><form id="delete-form"><div class="dialog-heading"><span class="dialog-icon danger-icon" data-icon="trash"></span></div><h2 id="delete-title">删除此账号？</h2><p id="delete-description"></p><p class="muted">凭据将从 CPA 移除，历史脱敏用量记录会保留。</p><div id="delete-error" class="field-error" role="alert" hidden></div><div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="delete-dialog">取消</button><button id="confirm-delete" class="button button-danger" type="submit">删除账号</button></div></form></dialog>
-  <dialog id="detail-dialog" class="detail-dialog" aria-labelledby="detail-title"><div class="dialog-heading"><span class="dialog-icon" data-icon="info"></span><button class="button button-quiet icon-button" type="button" data-close="detail-dialog" aria-label="关闭账号详情"><span data-icon="close"></span></button></div><h2 id="detail-title">账号详情</h2><div id="account-detail"></div><div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="detail-dialog">关闭</button></div></dialog>
+  <dialog id="detail-dialog" class="detail-dialog side-drawer" aria-labelledby="detail-title">
+    <div class="detail-header">
+      <div class="detail-account-heading"><span class="account-avatar" aria-hidden="true"><span data-icon="terminal"></span></span><div><h2 id="detail-title">账号详情</h2><p id="detail-subtitle" class="muted"></p></div><button class="button button-quiet icon-button" type="button" data-close="detail-dialog" aria-label="关闭账号详情"><span data-icon="close"></span></button></div>
+      <div class="detail-tabs" role="tablist" aria-label="账号详情内容">
+        <button type="button" role="tab" data-detail-tab="overview" aria-selected="true">概览</button>
+        <button type="button" role="tab" data-detail-tab="quota" aria-selected="false">额度</button>
+        <button type="button" role="tab" data-detail-tab="config" aria-selected="false">配置</button>
+        <button type="button" role="tab" data-detail-tab="models" aria-selected="false">模型</button>
+        <button type="button" role="tab" data-detail-tab="diagnostics" aria-selected="false">诊断</button>
+      </div>
+    </div>
+    <div class="detail-content"><div id="account-detail" role="tabpanel"></div><div id="account-models-content" role="tabpanel" hidden></div></div>
+    <div class="dialog-footer"><button id="detail-refresh" class="button button-secondary" type="button"><span data-icon="refresh"></span>刷新额度</button><button id="detail-toggle" class="button button-danger-quiet" type="button">禁用</button><button class="button button-secondary push-right" type="button" data-close="detail-dialog">关闭</button></div>
+  </dialog>
 
   <dialog id="model-dialog" aria-labelledby="model-dialog-title"><form id="model-form"><div class="dialog-heading"><span class="dialog-icon" data-icon="grid"></span><button class="button button-quiet icon-button" type="button" data-close="model-dialog" aria-label="关闭模型映射"><span data-icon="close"></span></button></div><h2 id="model-dialog-title">添加模型映射</h2><p class="muted">将 Factory 上游模型映射为独立的 CPA 模型 ID。</p><label>CPA 模型 ID<input id="mapping-id" type="text" required pattern="factory/.+" placeholder="factory/你的模型名称" maxlength="200" autocomplete="off"></label><label>上游模型 ID<input id="mapping-upstream" type="text" required maxlength="200" placeholder="Factory 接口实际接受的模型 ID" autocomplete="off"></label><div class="form-row"><label>显示名称<input id="mapping-name" type="text" required maxlength="120" placeholder="便于识别的名称"></label><label>原生调用协议<select id="mapping-protocol"><option value="anthropic">Anthropic 消息协议</option><option value="responses">OpenAI Responses 响应协议</option><option value="chat_completions">OpenAI 聊天补全协议</option></select></label></div><p id="mapping-protocol-hint" class="form-hint">唯一调用端点：POST /v1/messages。请按上游模型实际协议选择，模型名称不会决定协议。</p><label>上游提供方<input id="mapping-provider" type="text" required maxlength="80" placeholder="例如 anthropic 或 openai" autocomplete="off"></label><p class="form-hint">新增映射默认倍率为 1，美元单价留空。保存后可在模型列表调整。</p><div id="mapping-error" class="field-error" role="alert" hidden></div><div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="model-dialog">取消</button><button id="save-mapping" class="button button-primary" type="submit">添加映射</button></div></form></dialog>
   <dialog id="call-dialog" class="call-dialog" aria-labelledby="call-title"><div class="dialog-heading"><span class="dialog-icon" data-icon="terminal"></span><button class="button button-quiet icon-button" type="button" data-close="call-dialog" aria-label="关闭调用示例"><span data-icon="close"></span></button></div><h2 id="call-title">原生协议调用示例</h2><div id="call-protocol" class="call-protocol"></div><p class="muted call-description">将占位符替换为你的 CPA 推理地址和 CPA 客户端 API Key。此处不使用管理器地址、管理密钥或 Factory API Key。</p><pre id="call-example" class="call-example" tabindex="0" aria-label="可复制的 HTTP 请求示例"></pre><p class="form-hint">此模型仅支持上方端点；其他协议调用返回 400 protocol_mismatch，不会转发。</p><div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="call-dialog">关闭</button><button id="copy-call-example" class="button button-primary" type="button"><span data-icon="copy"></span>复制调用示例</button></div></dialog>
   <dialog id="verify-model-dialog" aria-labelledby="verify-model-title"><form id="verify-model-form"><div class="dialog-heading"><span class="dialog-icon" data-icon="shield"></span><button class="button button-quiet icon-button" type="button" data-close="verify-model-dialog" aria-label="关闭模型基础验证"><span data-icon="close"></span></button></div><h2 id="verify-model-title">验证并允许此模型</h2><div class="notice notice-warning compact probe-warning"><span data-icon="info"></span><p><strong>会消耗模型额度</strong>发送一次固定短请求，最多 128 输出 Token。此操作与目录刷新、状态查询、发布同步不同。</p></div><div id="verify-model-details"></div><p class="form-hint">仅验证当前账号、当前明确原生路由的一次基础调用；不证明工具、图像等全部能力或未来权限。</p><label class="checkbox-label"><input id="verify-model-confirmation" type="checkbox" required><span>我确认使用该账号发送一次会消耗额度的基础验证请求</span></label><div id="verify-model-error" class="field-error" role="alert" hidden></div><div id="verify-publication-note" class="notice notice-info compact" hidden>基础验证已有服务端记录，请使用发布同步重试，不要重复发送验证请求。</div><div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="verify-model-dialog">关闭</button><button id="verify-sync-only" class="button button-secondary" type="button" hidden>重试发布同步（不验证）</button><button id="confirm-model-verify" class="button button-primary" type="submit" disabled>验证并允许（消耗额度）</button></div></form></dialog>
+  <dialog id="price-dialog" class="price-dialog" aria-labelledby="price-dialog-title">
+    <form id="price-form">
+      <div class="dialog-heading"><div><h2 id="price-dialog-title">模型价格</h2><p id="price-model-name" class="muted"></p></div><button class="button button-quiet icon-button" type="button" data-close="price-dialog" aria-label="关闭模型价格"><span data-icon="close"></span></button></div>
+      <div class="price-unit">USD / 百万 Token</div>
+      <div class="price-base-fields">
+        <label>输入价<input id="price-input" type="number" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="例如 1.25"></label>
+        <label>输出价<input id="price-output" type="number" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="例如 5"></label>
+        <label>缓存读取价<input id="price-cache-read" type="number" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="沿用输入价"></label>
+        <label>缓存写入价<input id="price-cache-write" type="number" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="沿用输入价"></label>
+      </div>
+      <div class="price-rules-heading"><h3>计费规则</h3><button id="add-price-rule" class="button button-secondary" type="button"><span data-icon="plus"></span>添加规则</button></div>
+      <div id="price-rule-editor" class="price-rule-editor"></div>
+      <div id="price-error" class="field-error" role="alert" hidden></div>
+      <div class="dialog-footer"><button class="button button-secondary push-right" type="button" data-close="price-dialog">取消</button><button class="button button-primary" type="submit">应用修改</button></div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

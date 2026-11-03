@@ -14,7 +14,9 @@
     modelDraft: new Map(), budgetDirty: false, busy: new Set(), requests: new Set(),
     createDraft: null, createModels: new Map(), createSequence: 0, createSearch: "", createShowRoutes: false,
     createCatalogError: "", createProgress: "", createCommitPending: false, createKeyReplaced: false,
-    draftPickerSelection: new Set(), createTestModel: ""
+    draftPickerSelection: new Set(), createTestModel: "",
+    priceTarget: null, priceRules: [], detailAccount: null, detailTab: "overview", detailConfigDirty: false,
+    detailSequence: 0, detailConfigDraft: null, detailConfigError: ""
   };
   let toastTimer;
   let quotaHintSequence = 0;
@@ -80,6 +82,8 @@
   }
   document.querySelectorAll("[data-icon]").forEach((node) => node.append(icon(node.dataset.icon)));
   $("account-models-content").append($("model-access-section"));
+  $("global-models-content").append($("model-definitions-section"));
+  $("global-models-actions").append($("definition-actions"));
   const finite = (value) => typeof value === "number" && Number.isFinite(value);
   const format = (value) => finite(value) ? numberFormat.format(value) : "—";
   const count = (value) => finite(value) ? integerFormat.format(value) : "—";
@@ -149,13 +153,18 @@
     button.addEventListener("click", () => closeDialog(button.dataset.close));
   });
   document.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (event.target !== dialog || dialog.dataset.busy === "true") return;
+      const rect = dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeDialog(dialog.id);
+    });
     dialog.addEventListener("cancel", (event) => {
       if (dialog.dataset.busy === "true") event.preventDefault();
     });
     dialog.addEventListener("close", () => {
       if (dialog.id === "auth-dialog") $("management-key").value = "";
       if (dialog.id === "account-dialog") { $("account-key").value = ""; if (!state.editingAccount) discardCreateDraft(); }
-      if (dialog.id === "account-models-dialog") { state.accessLoadSequence++; state.accessLoading = false; }
+      if (dialog.id === "detail-dialog") { state.accessLoadSequence++; state.accessLoading = false; state.detailSequence++; state.detailConfigDirty = false; state.detailConfigDraft = null; state.detailConfigError = ""; }
     });
   });
 
@@ -205,6 +214,7 @@
     $("disconnect").hidden = !connected;
     $("refresh-all").disabled = !connected || state.loading;
     $("add-account").disabled = !connected || state.loading;
+    $("manage-models").disabled = !connected || state.loading;
     $("add-model").disabled = !connected || !state.settings || state.busy.has("settings");
     $("account-add-route").disabled = !connected || !state.settings || state.busy.has("settings");
     $("usage-account").disabled = !connected;
@@ -242,7 +252,8 @@
     state.createModels.clear();
     state.draftPickerSelection.clear();
     state.createTestModel = "";
-    for (const id of ["draft-candidate-dialog", "account-models-dialog"]) if ($(id).open) $(id).close();
+    if ($("draft-candidate-dialog").open) $("draft-candidate-dialog").close();
+    for (const id of ["global-models-dialog", "price-dialog", "detail-dialog"]) if ($(id).open) $(id).close();
     $("account-key").value = "";
     if ($("account-dialog").open) $("account-dialog").close();
     state.loading = false;
@@ -267,7 +278,7 @@
       state.accessLoading = false;
       state.connected = true;
       renderAll();
-      if ($("account-models-dialog").open) ensureAccountModels(true);
+      if ($("detail-dialog").open && state.detailTab === "models") ensureAccountModels(true);
       if (status?.message) showError("global-error", status.message);
     } catch (error) {
       if (epoch !== state.epoch) return;
@@ -402,7 +413,7 @@
     if (successes !== null || failures !== null) head.append(el("div", { class: "recent-counts" }, el("span", { class: "text-success" }, "● " + count(successes)), el("span", { class: "text-danger" }, "● " + count(failures))));
     else head.append(el("span", {}, "暂无观测记录"));
     section.append(head);
-    if (!items.length) { section.append(el("p", { class: "card-caption" }, "尚无请求记录；成功率与状态条不作展示。")); return section; }
+    if (!items.length) { section.append(el("p", { class: "card-caption" }, "暂无请求")); return section; }
     const bars = el("div", { class: "recent-bars", "aria-label": items.length ? "最近 " + Math.min(24, items.length) + " 次请求状态" : "暂无最近请求数据" });
     const visibleItems = items.slice(-24);
     for (let index = 0; index < 24; index++) {
@@ -479,14 +490,19 @@
     if (values.usedM === null) parts.push("完整已用 Token 未知。");
     return sanitize(parts.join(" "));
   }
-  function renderOfficialLimits(limits, prediction) {
+  function visibleQuotaWindows(windows) {
+    return (Array.isArray(windows) ? windows : []).filter((window) => window && window.group !== "core");
+  }
+  function renderOfficialLimits(limits, prediction, compact = false) {
+    const allWindows = Array.isArray(limits?.windows) ? limits.windows : [];
+    const windows = visibleQuotaWindows(allWindows);
+    if (allWindows.length && !windows.length) return null;
     const section = el("div", { class: "card-section compact-quota-section" });
-    const windows = (Array.isArray(limits?.windows) ? limits.windows : []).filter((window) => !(window.group === "core" && window.window_key === "fiveHour"));
     if (limits?.status !== "available" || !windows.length) {
       section.append(el("span", { class: "quota-unavailable", title: asText(limits?.message, "刷新账号后读取官方额度。") }, limits?.status === "not_checked" ? "额度尚未查询" : "额度暂不可读取"));
       return section;
     }
-    for (const window of windows) {
+    for (const window of compact ? windows.slice(0, 3) : windows) {
       const values = quotaValues(window, prediction);
       const explanation = quotaExplanation(window, values, limits);
       const hintId = "quota-hint-" + (++quotaHintSequence);
@@ -522,6 +538,7 @@
     const official = account.official_usage;
     const summary = requestSummary(usage);
     const status = accountStatus(account);
+    const statusLabel = account.enabled && status[0] === "账号已验证" ? "可用" : status[0];
     const isBusy = state.busy.has(account.id);
     const toggle = el("input", { type: "checkbox", role: "switch", checked: account.enabled === true, disabled: isBusy, "aria-label": (account.enabled ? "停用" : "启用") + "账号：" + account.label, "data-focus-key": account.id + ":toggle" });
     toggle.onchange = () => runAccount(account, "/accounts", "PATCH", { id: account.id, enabled: toggle.checked }, toggle.checked ? "账号已启用" : "账号已停用");
@@ -529,9 +546,9 @@
     card.append(el("div", { class: "account-top" },
       el("span", { class: "account-avatar" }, icon("terminal")),
       el("div", { class: "account-title" }, el("h3", { title: account.label || "未命名账号" }, account.label || "未命名账号"), el("span", { class: "account-subtitle", title: asText(account.identity?.email, keyHint(account.credential_hint)) }, asText(account.identity?.email, keyHint(account.credential_hint)))),
-      el("div", { class: "account-top-actions" }, el("span", { class: "badge badge-" + status[1] }, status[0]), el("label", { class: "switch" }, toggle))));
+      el("div", { class: "account-top-actions" }, el("span", { class: "badge badge-" + status[1] }, statusLabel), el("label", { class: "switch" }, toggle))));
     card.append(el("div", { class: "account-meta" }, el("span", { class: "badge badge-brand" }, account.kind === "oauth" ? "OAuth" : "API Key"), el("span", { class: "badge badge-neutral" }, "优先级 " + (finite(account.priority) ? account.priority : 0)), account.plan ? el("span", { class: "badge badge-neutral" }, String(account.plan)) : null));
-    card.append(el("div", { class: "account-note" }, icon("note"), asText(account.note, "Factory API Key · " + keyHint(account.credential_hint))));
+    if (asText(account.note, "")) card.append(el("div", { class: "account-note" }, icon("note"), account.note));
     const accountModels = state.accountModelCache.get(account.id)?.models;
     const modelAccess = Array.isArray(accountModels) ? accountModels : Array.isArray(account.model_access) ? account.model_access : null;
     const publishedCount = modelAccess ? modelAccess.filter((model) => model.published === true).length : Array.isArray(account.pinned_models) ? account.pinned_models.length : null;
@@ -542,21 +559,20 @@
     const completeTokens = usage.credits_complete !== false && !(finite(usage.requests_with_usage) && finite(summary.successful) && usage.requests_with_usage < summary.successful);
     const tokenTotal = completeTokens && finite(usage.input_tokens) && finite(usage.output_tokens) ? usage.input_tokens + usage.output_tokens : null;
     const history = el("div", { class: "card-section" },
-      el("div", { class: "card-section-title" }, el("h4", {}, "本周期用量"), el("span", {}, "本插件观测")),
+      el("div", { class: "card-section-title" }, el("h4", {}, "历史用量")),
       el("div", { class: "mini-stats" },
         miniStat("请求", compact(summary.total), "send", false, count(summary.total) + " 次，成功 " + count(summary.successful) + " / 失败 " + count(summary.failed)),
         miniStat("Token", compact(tokenTotal), "token", false, "本周期输入与输出合计，含验证；缓存及 reasoning 不重复相加"),
         miniStat("费用", finite(usage.estimated_cost_usd) ? usd(usage.estimated_cost_usd) : "—", "dollar", false, "本周期估算费用（USD），含验证；非官方账单"),
         miniStat("成功率", summary.rate !== null ? format(summary.rate) + "%" : "—", "check")),
       el("p", { class: "card-caption", title: date(usage.window_start) + " — " + date(usage.window_end) + "；含基础验证" }, period(usage.window_start, usage.window_end)));
-    card.append(history, renderRecent(usage), renderOfficialLimits(account.official_limits, account.prediction));
+    card.append(...[history, renderRecent(usage), renderOfficialLimits(account.official_limits, account.prediction, true)].filter(Boolean));
     if (account.last_error) card.append(el("p", { class: "account-error-message" }, sanitize(account.last_error)));
     const refresh = cardButton(account, "refresh", "验证 / 刷新", () => runAccount(account, "/accounts/refresh", "POST", { id: account.id }, "验证与用量状态已更新"));
     if (isBusy) refresh.classList.add("is-pending");
     card.append(el("div", { class: "account-footer" },
       cardButton(account, "trash", "删除账号", () => openDelete(account), true),
       el("span", { class: "footer-spacer" }),
-      el("span", { class: "card-caption", title: "更新时间：" + date(account.updated_at) }, account.updated_at ? date(account.updated_at, false) + " 更新" : "尚未更新"),
       refresh, cardButton(account, "grid", "模型管理", () => manageAccountModels(account.id)), cardButton(account, "settings", "账号设置", () => openAccount(account)), cardButton(account, "info", "详情", () => openDetail(account), false, true)));
     return card;
   }
@@ -590,6 +606,7 @@
   $("account-filter").onchange = (event) => { state.accountFilter = event.target.value; renderAccounts(); };
   function openAccount(account = null) {
     if (!state.connected) return openAuth();
+    if (account) return openDetail(account, false, "config");
     state.editingAccount = account;
     $("account-form").reset();
     $("account-dialog-title").textContent = account ? "账号设置" : "新建 Factory 账号";
@@ -667,10 +684,6 @@
       lockDialog($("account-dialog"), false);
     }
   };
-  const DRAFT_PRICE_FIELDS = [
-    ["input_price_usd_per_million", "输入单价"], ["output_price_usd_per_million", "输出单价"],
-    ["cache_read_price_usd_per_million", "缓存读取单价"], ["cache_write_price_usd_per_million", "缓存写入单价"]
-  ];
   function draftExpired() {
     return !!state.createDraft && (!Number.isFinite(new Date(state.createDraft.expires_at).getTime()) || new Date(state.createDraft.expires_at).getTime() <= Date.now());
   }
@@ -718,13 +731,10 @@
     const model = option.model;
     if (state.createModels.has(model.model_id)) return;
     if (state.createModels.size >= 100) return showError("account-error", "每个账号最多选择 100 个模型。");
-    const configured = (state.settings?.models || []).find((item) => item.id === model.model_id) || {};
     state.createModels.set(model.model_id, {
       modelId: model.model_id, displayName: model.display_name || model.model_id,
       alias: model.alias || "", protocol: model.protocol, upstreamId: model.upstream_id,
-      source: option.source, snapshotId: option.snapshotId || null,
-      prices: Object.fromEntries(DRAFT_PRICE_FIELDS.map(([field]) => [field, model.model_override?.[field] ?? null])),
-      globalPrices: Object.fromEntries(DRAFT_PRICE_FIELDS.map(([field]) => [field, configured[field] ?? null]))
+      source: option.source, snapshotId: option.snapshotId || null
     });
     $("draft-test-confirmation").checked = false;
     if (render) renderCreateAccount();
@@ -793,17 +803,11 @@
     const protocol = protocolMeta(model.protocol);
     const aliasInput = el("input", { type: "text", value: model.alias, placeholder: model.modelId.slice("factory/".length), maxLength: 80, pattern: "[A-Za-z0-9._-]+", spellcheck: false, disabled: busy, "aria-label": model.displayName + " 固定账号调用别名" });
     aliasInput.oninput = () => { model.alias = aliasInput.value; updateDraftControls(); };
-    const prices = DRAFT_PRICE_FIELDS.map(([field, label]) => {
-      const input = el("input", { type: "number", min: "0", step: "any", placeholder: finite(model.globalPrices[field]) ? "继承全局 " + format(model.globalPrices[field]) : "继承全局 · 未配置", value: model.prices[field] ?? "", disabled: busy, "aria-label": model.displayName + " " + label });
-      input.oninput = () => { model.prices[field] = input.value === "" ? null : input.value; updateDraftControls(); };
-      return el("label", {}, label, input);
-    });
     const error = proof?.last_probe_error || proof?.last_error;
     const status = verified ? ["基础测试通过", "success"] : proof?.verification_status === "failed" ? ["基础测试失败", "danger"] : ["尚未测试", "neutral"];
     return el("article", { class: "draft-model-card" + (verified ? " is-verified" : "") },
       el("div", { class: "draft-model-line" }, el("strong", { class: "draft-model-name", title: model.modelId }, model.displayName), el("span", { class: "muted", "aria-hidden": "true" }, "→"), aliasInput, el("button", { type: "button", class: "button button-quiet icon-button", "aria-label": "移除 " + model.displayName, disabled: busy, onclick: () => removeDraftModel(model.modelId) }, icon("close"))),
       el("div", { class: "draft-model-meta" }, el("span", { class: "draft-native-protocol" }, protocol?.label || "协议未知", el("code", {}, protocol ? "POST " + protocol.endpoint : "端点未知")), el("span", { class: "badge badge-" + status[1], title: verified ? "验证时间：" + date(proof.verified_at) : error ? sanitize(error) : "创建后仍需验证才可发布" }, status[0])),
-      el("details", { class: "draft-prices" }, el("summary", {}, "估算价格 · USD / 百万 Token"), el("div", { class: "form-row" }, prices.slice(0, 2)), el("div", { class: "form-row" }, prices.slice(2)), el("p", {}, "留空继承全局；覆盖仅影响本账号，修改不重测。")),
       el("span", { class: "sr-only" }, "别名仅改变固定账号 ID；共享模型 ID 不变。"));
   }
   function draftConfigurationProblem() {
@@ -814,7 +818,6 @@
       const effective = alias || model.modelId.slice("factory/".length);
       if (aliases.has(effective)) return "调用别名不能重复。";
       aliases.add(effective);
-      for (const [field] of DRAFT_PRICE_FIELDS) if (model.prices[field] !== null && (!Number.isFinite(Number(model.prices[field])) || Number(model.prices[field]) < 0)) return "价格须为空或非负有限数。";
     }
     return "";
   }
@@ -944,7 +947,6 @@
     if (draftExpired()) throw new Error("草稿已过期，请重新填写账号。");
     const modelOverrides = [...state.createModels.values()].map((model) => ({
       model_id: model.modelId, alias: model.alias.trim() || null,
-      ...Object.fromEntries(DRAFT_PRICE_FIELDS.map(([field]) => [field, model.prices[field] === null ? null : Number(model.prices[field])]))
     }));
     return api("/drafts/models", "PUT", { id: state.createDraft.id, model_ids: [...state.createModels.keys()], model_overrides: modelOverrides });
   }
@@ -1135,30 +1137,130 @@
   function pinnedDetail(account, expanded = false) {
     return el("details", { class: "detail-section pinned-detail", open: expanded },
       el("summary", {}, "固定账号模型", el("span", { class: "badge badge-" + (account.enabled ? "brand" : "neutral") }, account.enabled ? "固定使用此账号" : "账号已停用")),
-      el("p", { class: "muted" }, "可选：使用固定模型 ID 指定此账号；共享模型由 CPA 路由选择账号。固定与共享 ID 支持相同的原生协议和调用端点。"),
       pinnedModelList(account));
   }
-  function openDetail(account, modelsFirst = false) {
+  function detailSection(title, ...children) {
+    return el("section", { class: "detail-section" }, el("h3", {}, title), ...children.filter(Boolean));
+  }
+  function detailConfigForm(account) {
+    if (state.detailConfigDraft?.accountId !== account.id) {
+      state.detailConfigDraft = { accountId: account.id, label: account.label || "", priority: account.priority ?? 0, enabled: account.enabled === true };
+    }
+    const draft = state.detailConfigDraft;
+    const busy = state.busy.has("detail-config");
+    const reset = el("button", { type: "button", class: "button button-secondary", disabled: busy || !state.detailConfigDirty, onclick: () => { state.detailConfigDraft = null; state.detailConfigDirty = false; state.detailConfigError = ""; renderAccountDetail(); } }, "重置");
+    const save = el("button", { type: "submit", class: "button button-primary", disabled: busy || !state.detailConfigDirty }, "保存");
+    const label = el("input", { type: "text", value: draft.label, maxLength: 80, required: true, autocomplete: "off", disabled: busy });
+    const priority = el("input", { type: "number", value: draft.priority, min: -100, max: 100, step: 1, title: "数值较高的账号优先", disabled: busy });
+    const enabled = el("input", { type: "checkbox", checked: draft.enabled, disabled: busy });
+    const markDirty = () => { state.detailConfigDirty = true; state.detailConfigError = ""; reset.disabled = save.disabled = false; error.hidden = true; };
+    label.oninput = () => { draft.label = label.value; markDirty(); };
+    priority.oninput = () => { draft.priority = priority.value; markDirty(); };
+    enabled.onchange = () => { draft.enabled = enabled.checked; markDirty(); };
+    const error = el("div", { id: "detail-config-error", class: "field-error", role: "alert", hidden: !state.detailConfigError }, sanitize(state.detailConfigError));
+    const form = el("form", { class: "detail-config-form" },
+      el("div", { class: "detail-config-actions" }, reset, save),
+      el("section", { class: "detail-config-fields" }, el("label", {}, "账号名称", label), el("label", {}, "优先级", priority), el("label", { class: "checkbox-label" }, enabled, el("span", {}, "启用此账号"))),
+      error,
+      detailSection("账号信息", detailRows([["账号类型", account.kind === "oauth" ? "OAuth" : "API Key"], ["凭据提示", keyHint(account.credential_hint)], ["邮箱", asText(account.identity?.email)], ["组织", asText(account.identity?.organization)], ["区域", asText(account.identity?.region)], ["最近验证", date(account.last_checked_at)], ["最近更新", date(account.updated_at)], ["创建时间", date(account.created_at)]])));
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (state.busy.has("detail-config")) return;
+      if (!label.value.trim()) { state.detailConfigError = "请填写账号名称。"; error.textContent = state.detailConfigError; error.hidden = false; return; }
+      const accountId = account.id, sequence = state.detailSequence, epoch = state.epoch;
+      const current = () => epoch === state.epoch && sequence === state.detailSequence && state.detailAccount?.id === accountId && $("detail-dialog").open;
+      state.busy.add("detail-config");
+      state.detailConfigError = "";
+      save.disabled = reset.disabled = label.disabled = priority.disabled = enabled.disabled = true;
+      error.hidden = true;
+      try {
+        await api("/accounts", "PATCH", { id: accountId, label: label.value.trim(), enabled: enabled.checked, priority: Number(priority.value) });
+        await loadAll();
+        if (!current()) return;
+        state.detailAccount = state.accounts.find((item) => item.id === accountId) || account;
+        state.detailConfigDraft = null;
+        state.detailConfigDirty = false;
+        notify("账号设置已保存");
+      } catch (error) { if (current()) state.detailConfigError = error.message; }
+      finally { state.busy.delete("detail-config"); if (current()) renderAccountDetail(); }
+    };
+    return form;
+  }
+
+  function renderAccountDetail() {
+    const account = state.detailAccount;
+    if (!account) return;
     const usage = account.usage || {};
     const official = account.official_usage || {};
     const summary = requestSummary(usage);
+    const completeTokens = usage.credits_complete !== false;
+    const tokenTotal = completeTokens && finite(usage.input_tokens) && finite(usage.output_tokens) ? usage.input_tokens + usage.output_tokens : null;
+    const status = accountStatus(account);
+    const showModels = state.detailTab === "models";
+    $("account-detail").hidden = showModels;
+    $("account-models-content").hidden = !showModels;
     $("detail-title").textContent = account.label || "账号详情";
-    const detail = [
-      modelsFirst ? pinnedDetail(account, true) : null,
-      detailRows([["账号类型", account.kind === "oauth" ? "OAuth" : "API Key"], ["凭据提示", keyHint(account.credential_hint)], ["验证状态", accountStatus(account)[0]], ["优先级", String(account.priority ?? 0)], ["邮箱", asText(account.identity?.email)], ["组织", asText(account.identity?.organization)], ["区域", asText(account.identity?.region)], ["最近验证", date(account.last_checked_at)], ["最近更新", date(account.updated_at)], ["创建时间", date(account.created_at)]]),
-      !modelsFirst ? pinnedDetail(account) : null,
-      el("section", { class: "detail-section" }, el("h3", {}, "官方用量"),
-        detailRows([["来源", "Factory Analytics"], ["官方已使用", officialLabel(official)], ["官方额外余额", finite(account.official_limits?.extra_usage_balance_usd) ? usd(account.official_limits.extra_usage_balance_usd) + " USD" : "未知（不从消耗推算）"], ["官方周期", period(official.window_start, official.window_end)], ["查询时间", date(official.checked_at)], ["说明", asText(official.message, "按官方实际返回值展示。")]])),
-      el("section", { class: "detail-section" }, el("h3", {}, "本地记录"),
-        detailRows([["统计周期", period(usage.window_start, usage.window_end)], ["成功 / 失败", count(summary.successful) + " / " + count(summary.failed)], ["包含 usage", count(usage.requests_with_usage) + " 次"], ["输入 token", count(usage.input_tokens)], ["输出 token", count(usage.output_tokens)], ["缓存输入 token", count(usage.cached_input_tokens)], ["缓存写入 token", count(usage.cache_write_tokens)], ["推理 token", count(usage.reasoning_tokens) + "（已包含在输出中）"], ["本地估算", format(usage.estimated_credits) + " 加权 token"], ["估算费用", finite(usage.estimated_cost_usd) ? usd(usage.estimated_cost_usd) + " USD" : "未配置或数据不足"], ["覆盖范围", asText(usage.coverage, "仅本插件观测到的请求。")]])),
-      el("section", { class: "detail-section" }, el("h3", {}, "官方额度与可用量估算"),
-        renderOfficialLimits(account.official_limits, account.prediction),
-        ...(account.prediction?.windows || []).filter((window) => window.status === "estimated").map((window) => detailRows([["估算窗口", asText(window.name)], ["基准快照", date(window.baseline_at)], ["采样快照", date(window.sampled_at)], ["额度变化", format(window.delta_used_percent) + "%"], ["样本 token", count(window.sample_tokens)], ["样本请求", count(window.sample_requests)]]))),
-      account.last_error ? el("p", { class: "field-error" }, sanitize(account.last_error)) : null
-    ];
-    $("account-detail").replaceChildren(...detail.filter(Boolean));
+    $("detail-subtitle").textContent = [account.plan, account.identity?.email, account.auth_file].filter(Boolean).join(" · ") || keyHint(account.credential_hint);
+    $("detail-toggle").textContent = account.enabled ? "禁用" : "启用";
+    $("detail-toggle").disabled = $("detail-refresh").disabled = state.busy.has(account.id);
+    document.querySelectorAll("[data-detail-tab]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.detailTab === state.detailTab)));
+    let content = [];
+    if (state.detailTab === "overview") {
+      content = [
+        el("section", { class: "detail-availability" }, el("div", {}, icon("shield"), el("strong", {}, "当前可用性")), el("span", { class: "badge badge-" + status[1] }, account.enabled && status[0] === "账号已验证" ? "可用" : status[0]), detailRows([["验证状态", status[0]], ["最近检查", date(account.last_checked_at)]])),
+        detailSection("历史用量", el("div", { class: "mini-stats" }, miniStat("请求", compact(summary.total), "send"), miniStat("Token", compact(tokenTotal), "token"), miniStat("费用", finite(usage.estimated_cost_usd) ? usd(usage.estimated_cost_usd) : "—", "dollar"), miniStat("成功率", summary.rate !== null ? format(summary.rate) + "%" : "—", "check"))),
+        renderRecent(usage),
+        renderOfficialLimits(account.official_limits, account.prediction, true)
+      ];
+    } else if (state.detailTab === "quota") {
+      const estimatedWindows = visibleQuotaWindows(account.prediction?.windows).filter((window) => window.status === "estimated");
+      content = [detailSection("官方用量", detailRows([["已使用", officialLabel(official)], ["额外余额", finite(account.official_limits?.extra_usage_balance_usd) ? usd(account.official_limits.extra_usage_balance_usd) + " USD" : "—"], ["周期", period(official.window_start, official.window_end)], ["查询时间", date(official.checked_at)]])), detailSection("额度与恢复", renderOfficialLimits(account.official_limits, account.prediction), ...estimatedWindows.map((window) => detailRows([["估算窗口", asText(window.name)], ["基准快照", date(window.baseline_at)], ["采样快照", date(window.sampled_at)], ["额度变化", format(window.delta_used_percent) + "%"], ["样本 token", count(window.sample_tokens)], ["样本请求", count(window.sample_requests)]])))];
+    } else if (state.detailTab === "config") {
+      content = [detailConfigForm(account)];
+    } else if (state.detailTab === "models") {
+      content = [];
+    } else {
+      content = [detailSection("本地记录", detailRows([["统计周期", period(usage.window_start, usage.window_end)], ["成功 / 失败", count(summary.successful) + " / " + count(summary.failed)], ["包含 usage", count(usage.requests_with_usage) + " 次"], ["输入 token", count(usage.input_tokens)], ["输出 token", count(usage.output_tokens)], ["缓存输入 token", count(usage.cached_input_tokens)], ["缓存写入 token", count(usage.cache_write_tokens)], ["推理 token", count(usage.reasoning_tokens)], ["本地估算", format(usage.estimated_credits) + " 加权 token"], ["估算费用", finite(usage.estimated_cost_usd) ? usd(usage.estimated_cost_usd) + " USD" : "—"], ["记录范围", asText(usage.coverage, "—")]])), detailSection("官方查询", detailRows([["额度状态", asText(account.official_limits?.status)], ["额度信息", asText(account.official_limits?.message)], ["消耗状态", asText(official.status)], ["消耗信息", asText(official.message)]])), account.last_error ? el("p", { class: "field-error" }, sanitize(account.last_error)) : null];
+    }
+    $("account-detail").replaceChildren(...content.filter(Boolean));
+  }
+  function openDetail(account, modelsFirst = false, tab = "overview") {
+    if (state.detailAccount?.id !== account.id) {
+      state.detailConfigDirty = false;
+      state.detailConfigDraft = null;
+      state.detailConfigError = "";
+    }
+    state.detailSequence++;
+    state.detailAccount = account;
+    state.detailTab = modelsFirst ? "models" : tab;
+    renderAccountDetail();
     openDialog("detail-dialog");
   }
+  document.querySelectorAll("[data-detail-tab]").forEach((button) => { button.onclick = () => {
+    if (button.dataset.detailTab === "models" && state.detailAccount) return manageAccountModels(state.detailAccount.id);
+    state.detailTab = button.dataset.detailTab;
+    renderAccountDetail();
+  }; });
+  $("detail-refresh").onclick = async () => {
+    const account = state.detailAccount;
+    if (!account) return;
+    const accountId = account.id, sequence = state.detailSequence, epoch = state.epoch;
+    await runAccount(account, "/accounts/refresh", "POST", { id: account.id }, "额度已刷新");
+    if (epoch === state.epoch && sequence === state.detailSequence && state.detailAccount?.id === accountId && $("detail-dialog").open) {
+      state.detailAccount = state.accounts.find((item) => item.id === accountId) || account;
+      renderAccountDetail();
+    }
+  };
+  $("detail-toggle").onclick = async () => {
+    const account = state.detailAccount;
+    if (!account) return;
+    const accountId = account.id, sequence = state.detailSequence, epoch = state.epoch;
+    await runAccount(account, "/accounts", "PATCH", { id: account.id, enabled: !account.enabled }, account.enabled ? "账号已停用" : "账号已启用");
+    if (epoch === state.epoch && sequence === state.detailSequence && state.detailAccount?.id === accountId && $("detail-dialog").open) {
+      state.detailAccount = state.accounts.find((item) => item.id === accountId) || account;
+      renderAccountDetail();
+    }
+  };
 
   function renderUsage() {
     const usage = state.usage;
@@ -1434,7 +1536,23 @@
       if (state.modelsSection === "access") ensureAccountModels();
     };
   });
+  async function manageGlobalModels() {
+    if (!state.connected) return;
+    state.modelsSection = "definitions";
+    renderModelSection();
+    renderModels();
+    openDialog("global-models-dialog");
+    try {
+      await loadModelMetadata(true);
+      if ($("global-models-dialog").open) renderModels();
+    } catch (error) { showError("model-error", error.message); }
+  }
+  $("manage-models").onclick = manageGlobalModels;
+
   async function manageAccountModels(accountId) {
+    const account = state.accounts.find((item) => item.id === accountId);
+    if (!account) return;
+    openDetail(account, true);
     if (state.modelAccount !== accountId) {
       state.modelAccount = accountId;
       state.accessError = null;
@@ -1445,13 +1563,11 @@
     }
     state.modelsSection = "access";
     syncModelAccountScope();
-    $("account-models-title").textContent = (selectedModelAccount()?.label || "账号") + " · 模型管理";
     renderModelSection();
     renderAccountModels();
-    openDialog("account-models-dialog");
     try {
       await loadModelMetadata();
-      if (!$("account-models-dialog").open || state.modelAccount !== accountId) return;
+      if (!$("detail-dialog").open || state.detailTab !== "models" || state.modelAccount !== accountId) return;
       await ensureAccountModels(true);
     } catch (error) { showError("access-error", error.message); }
   }
@@ -1474,7 +1590,7 @@
     state.accountModelCache.set(data.account_id, data);
   }
   async function ensureAccountModels(force = false) {
-    if (!$("account-models-dialog").open) return;
+    if (!$("detail-dialog").open || state.detailTab !== "models") return;
     if (!state.connected || !state.modelAccount) { renderAccountModels(); return; }
     if (!force && (state.accessLoading || state.accountModelCache.has(state.modelAccount))) { renderAccountModels(); return; }
     const accountId = state.modelAccount;
@@ -1508,6 +1624,10 @@
     state.candidateRoutes.clear();
     state.candidatePage = 1;
     renderAccountModels();
+    if ($("detail-dialog").open && state.detailTab === "models") {
+      state.detailAccount = selectedModelAccount() || state.detailAccount;
+      renderAccountDetail();
+    }
     ensureAccountModels(true);
   };
   $("reload-account-models").onclick = () => ensureAccountModels(true);
@@ -1802,6 +1922,106 @@
     }
   };
   const numericModelFields = ["input_multiplier", "output_multiplier", "cache_multiplier", "cache_creation_multiplier", "input_price_usd_per_million", "output_price_usd_per_million", "cache_read_price_usd_per_million", "cache_write_price_usd_per_million"];
+  const MODEL_PRICE_FIELDS = [
+    ["input_price_usd_per_million", "input", "price-input", "输入价"],
+    ["output_price_usd_per_million", "output", "price-output", "输出价"],
+    ["cache_read_price_usd_per_million", "cache_read", "price-cache-read", "缓存读取价"],
+    ["cache_write_price_usd_per_million", "cache_write", "price-cache-write", "缓存写入价"]
+  ];
+  function priceText(value) {
+    return finite(Number(value)) ? String(Number(value)) : "—";
+  }
+  function priceRuleLabel(rule) {
+    const threshold = rule.input_tokens_above;
+    const context = threshold === null || threshold === undefined ? "" : ">" + (threshold % 1000 === 0 ? threshold / 1000 + "K" : count(threshold));
+    const tier = rule.service_tier === "priority" ? "fast/priority" : rule.service_tier || "";
+    return [context, tier].filter(Boolean).join(" · ");
+  }
+  function readPriceNumber(input, label, required = false) {
+    const text = input.value.trim();
+    if (!text) {
+      if (required) throw new Error("请填写" + label + "。");
+      return null;
+    }
+    const value = Number(text);
+    if (!Number.isFinite(value) || value < 0 || value > 1000000) throw new Error(label + "须为 0 到 1000000 的有限数。");
+    return value;
+  }
+  function priceRuleBadges(rules) {
+    if (!rules.length) return null;
+    return el("div", { class: "price-rules" }, rules.map((rule) => el("span", { class: "price-rule", title: "输入 $" + priceText(rule.input) + " · 输出 $" + priceText(rule.output) + " · 缓存读取 $" + priceText(rule.cache_read ?? rule.input) + " · 缓存写入 $" + priceText(rule.cache_write ?? rule.input) }, el("strong", {}, priceRuleLabel(rule)), el("span", {}, "$" + priceText(rule.input) + " / $" + priceText(rule.output)))));
+  }
+  function addPriceRule(value = {}, open = true) {
+    if (state.priceRules.length >= 64) return;
+    const threshold = el("input", { type: "number", min: "0", step: "1", value: value.input_tokens_above ?? "", placeholder: "不限制", "aria-label": "规则输入 Token 大于" });
+    const tier = el("select", { "aria-label": "规则服务等级" }, ...[["", "标准服务"], ["priority", "fast / priority"], ["flex", "flex"], ["batch", "batch"], ["ultrafast", "ultrafast"]].map(([id, label]) => el("option", { value: id }, label)));
+    tier.value = value.service_tier || "";
+    const fields = {};
+    const grid = el("div", { class: "price-rule-fields" });
+    for (const [, key, , label] of MODEL_PRICE_FIELDS) {
+      const required = key === "input" || key === "output";
+      const input = el("input", { type: "number", min: "0", max: "1000000", step: "0.000001", inputmode: "decimal", value: value[key] ?? "", placeholder: required ? "必填" : "沿用输入价", "aria-label": "规则" + label });
+      fields[key] = input;
+      grid.append(el("label", {}, label, input));
+    }
+    const card = el("details", { class: "price-rule-card", open });
+    const title = el("strong"), rates = el("span", { class: "price-rule-rates" });
+    const entry = { card, read: () => {
+      const inputTokensAbove = threshold.value.trim() ? Number(threshold.value) : null;
+      if (inputTokensAbove !== null && (!Number.isSafeInteger(inputTokensAbove) || inputTokensAbove <= 0)) throw new Error("输入 Token 门槛须为大于 0 的整数。");
+      if (inputTokensAbove === null && !tier.value) throw new Error("计费规则需设置 Token 门槛或服务等级。");
+      return { input_tokens_above: inputTokensAbove, service_tier: tier.value || null, ...Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, readPriceNumber(input, "规则" + key, key === "input" || key === "output")])) };
+    } };
+    const summarize = () => {
+      title.textContent = priceRuleLabel({ input_tokens_above: threshold.value ? Number(threshold.value) : null, service_tier: tier.value || null }) || "新计费规则";
+      rates.textContent = "输入 " + (fields.input.value ? "$" + fields.input.value : "待填写") + " · 输出 " + (fields.output.value ? "$" + fields.output.value : "待填写");
+    };
+    card.addEventListener("input", summarize);
+    tier.onchange = summarize;
+    const remove = el("button", { type: "button", class: "button button-quiet icon-button", "aria-label": "删除计费规则", onclick: () => {
+      state.priceRules.splice(state.priceRules.indexOf(entry), 1);
+      card.remove();
+      $("add-price-rule").disabled = false;
+    } }, icon("trash"));
+    card.append(el("summary", { class: "price-rule-summary" }, title, rates), el("div", { class: "price-rule-body" }, el("div", { class: "price-rule-conditions" }, el("label", {}, "输入 Token 大于", threshold), el("label", {}, "服务等级", tier), remove), grid));
+    state.priceRules.push(entry);
+    $("price-rule-editor").append(card);
+    $("add-price-rule").disabled = state.priceRules.length >= 64;
+    summarize();
+  }
+  function openPriceEditor(model) {
+    const effective = { ...model, ...(state.modelDraft.get(model.id) || {}) };
+    state.priceTarget = model;
+    state.priceRules = [];
+    $("price-model-name").textContent = model.display_name + " · " + model.id;
+    for (const [field, , id] of MODEL_PRICE_FIELDS) $(id).value = effective[field] ?? "";
+    $("price-rule-editor").replaceChildren();
+    for (const rule of effective.price_rules || []) addPriceRule(rule, false);
+    $("add-price-rule").disabled = state.priceRules.length >= 64;
+    showError("price-error", "");
+    openDialog("price-dialog");
+  }
+  $("add-price-rule").onclick = () => addPriceRule();
+  $("price-form").addEventListener("input", () => showError("price-error", ""));
+  $("price-form").onsubmit = (event) => {
+    event.preventDefault();
+    if (!state.priceTarget) return;
+    try {
+      const base = Object.fromEntries(MODEL_PRICE_FIELDS.map(([field, , id, label]) => [field, readPriceNumber($(id), label)]));
+      if ((base.input_price_usd_per_million === null) !== (base.output_price_usd_per_million === null)) throw new Error("输入价和输出价需同时设置，或同时留空。");
+      const rules = state.priceRules.map((entry) => entry.read());
+      const conditions = new Set();
+      for (const rule of rules) {
+        const key = String(rule.input_tokens_above) + ":" + String(rule.service_tier);
+        if (conditions.has(key)) throw new Error("相同 Token 门槛和服务等级的规则不能重复。");
+        conditions.add(key);
+      }
+      for (const [field, value] of Object.entries(base)) draftModel(state.priceTarget, field, value);
+      draftModel(state.priceTarget, "price_rules", rules);
+      $("price-dialog").close();
+      renderModels();
+    } catch (error) { showError("price-error", error.message); }
+  };
   function modelValue(model, field) {
     const draft = state.modelDraft.get(model.id);
     return draft && Object.hasOwn(draft, field) ? draft[field] : model[field];
@@ -1835,19 +2055,24 @@
       const row = el("tr", {},
         el("td", {}, el("div", { class: "model-name" }, asText(model.display_name, model.id)), el("div", { class: "model-id" }, el("code", {}, model.id), copy), modelProtocolInfo(model), el("div", { class: "model-support" }, (model.supports_images ? "图文输入" : "文本输入") + " · 上游 " + asText(model.upstream_id))),
         el("td", {}, el("span", { class: "badge badge-" + status[1] }, status[0])));
-      const labels = ["输入倍率", "输出倍率", "缓存读取倍率", "缓存写入倍率", "输入美元单价", "输出美元单价", "缓存读取美元单价", "缓存写入美元单价"];
-      numericModelFields.forEach((field, index) => {
+      const labels = ["输入倍率", "输出倍率", "缓存读取倍率", "缓存写入倍率"];
+      numericModelFields.slice(0, 4).forEach((field, index) => {
         const value = modelValue(model, field);
         const input = el("input", { type: "number", min: 0, step: "any", value: value ?? "", placeholder: index > 3 ? "未设置" : "1", disabled: !state.connected, "aria-label": model.display_name + " " + labels[index] });
         input.oninput = () => draftModel(model, field, input.value);
         row.append(el("td", {}, input));
       });
+      const inputPrice = modelValue(model, "input_price_usd_per_million");
+      const outputPrice = modelValue(model, "output_price_usd_per_million");
+      const rules = modelValue(model, "price_rules") || [];
+      const priceButton = el("button", { type: "button", class: "button button-secondary", disabled: !state.connected, onclick: () => openPriceEditor(model) }, icon("settings"), finite(inputPrice) && finite(outputPrice) ? "编辑价格" : "设置价格");
+      row.append(el("td", { class: "model-price-cell" }, el("div", { class: "model-price-base" }, finite(inputPrice) && finite(outputPrice) ? "$" + priceText(inputPrice) + " / $" + priceText(outputPrice) : rules.length ? "按规则计价" : "未设置"), priceRuleBadges(rules), priceButton));
       const toggle = el("input", { type: "checkbox", role: "switch", checked: modelValue(model, "enabled") === true, disabled: !state.connected, "aria-label": "启用模型：" + model.id });
       toggle.onchange = () => draftModel(model, "enabled", toggle.checked);
       row.append(el("td", {}, el("label", { class: "switch" }, toggle)));
       return row;
     });
-    $("model-rows").replaceChildren(...(rows.length ? rows : [el("tr", {}, el("td", { colspan: 11, class: "table-empty" }, state.connected ? "没有匹配的模型" : "管理授权后查看模型与估算配置"))]));
+    $("model-rows").replaceChildren(...(rows.length ? rows : [el("tr", {}, el("td", { colspan: 8, class: "table-empty" }, state.connected ? "没有匹配的模型" : "管理授权后查看模型与估算配置"))]));
   }
   function renderPinnedModels() {
     $("pinned-model-panel").hidden = !state.connected || !state.accounts.length;
@@ -1863,6 +2088,7 @@
     if (state.busy.has("settings") || !state.modelDraft.size) return;
     showError("model-error", "");
     state.busy.add("settings");
+    const submittedDraft = new Map([...state.modelDraft].map(([id, draft]) => [id, { ...draft }]));
     const epoch = state.epoch;
     const credential = state.token;
     setConnection(state.connected);
@@ -1871,7 +2097,7 @@
       const current = await api("/settings", "GET", undefined, credential);
       if (epoch !== state.epoch) return;
       const models = current.models.map((model) => {
-        const draft = state.modelDraft.get(model.id);
+        const draft = submittedDraft.get(model.id);
         if (!draft) return model;
         const updated = { ...model, ...draft };
         for (const field of numericModelFields) {
@@ -1884,8 +2110,12 @@
       const saved = await api("/settings", "PUT", { ...current, models }, credential);
       if (epoch !== state.epoch) return;
       state.settings = saved;
-      state.modelDraft.clear();
+      for (const [id, submitted] of submittedDraft) {
+        if (JSON.stringify(state.modelDraft.get(id)) === JSON.stringify(submitted)) state.modelDraft.delete(id);
+      }
       await loadAll();
+      await loadModelMetadata(true);
+      if ($("global-models-dialog").open) renderModels();
       notify("模型配置已保存");
     } catch (error) { showError("model-error", error.message); }
     finally { state.busy.delete("settings"); restore(); setConnection(state.connected); $("models-unsaved").hidden = state.modelDraft.size === 0; }
@@ -1912,7 +2142,8 @@
       id, upstream_id: $("mapping-upstream").value.trim(), display_name: $("mapping-name").value.trim(),
       protocol: $("mapping-protocol").value, upstream_provider: $("mapping-provider").value.trim(), enabled: true,
       context_length: 0, max_output_tokens: 8192, supports_images: false, input_multiplier: 1, output_multiplier: 1, cache_multiplier: 1, cache_creation_multiplier: 1,
-      input_price_usd_per_million: null, output_price_usd_per_million: null, cache_read_price_usd_per_million: null, cache_write_price_usd_per_million: null
+      input_price_usd_per_million: null, output_price_usd_per_million: null, cache_read_price_usd_per_million: null, cache_write_price_usd_per_million: null,
+      price_rules: []
     };
     state.busy.add("settings");
     const epoch = state.epoch;
@@ -1938,7 +2169,7 @@
     setConnection(state.connected);
     renderAccounts();
     setView("accounts");
-    if ($("account-models-dialog").open) { syncModelAccountScope(); renderAccountModels(); }
+    if ($("detail-dialog").open && state.detailTab === "models") { syncModelAccountScope(); renderAccountModels(); }
   }
 
   function initializeTheme() {

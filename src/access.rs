@@ -249,12 +249,6 @@ impl Store {
             .iter()
             .filter(|model| blocked_reasons(account, model).is_empty())
             .cloned()
-            .map(|mut model| {
-                if let Some(overrides) = account.model_overrides.get(&model.id) {
-                    overrides.apply(&mut model);
-                }
-                model
-            })
             .collect()
     }
     pub fn account_for_auth(&self, auth_id: &str) -> Option<&Account> {
@@ -295,7 +289,7 @@ impl Store {
             .iter()
             .find(|m| m.id == id)
             .or_else(|| rows.iter().find(|m| account.pinned_id(m) == id));
-        let mut model = if let Some(exact) = exact {
+        let model = if let Some(exact) = exact {
             exact.clone()
         } else {
             let mut upstream = rows.iter().filter(|m| m.upstream_id == id);
@@ -305,9 +299,6 @@ impl Store {
             }
             model.clone()
         };
-        if let Some(overrides) = account.model_overrides.get(&model.id) {
-            overrides.apply(&mut model);
-        }
         Some(model)
     }
 }
@@ -1758,16 +1749,13 @@ pub fn test_draft(rt: &Arc<Runtime>, data: &Value, callback: &str) -> Result<Val
             ));
         }
         let store = rt.lock()?;
-        let mut model = store
+        let model = store
             .settings
             .models
             .iter()
             .find(|m| m.id == model_id && m.enabled)
             .cloned()
             .ok_or_else(|| Fault::new(404, "model_not_found", "模型路由已停用或不存在"))?;
-        if let Some(overrides) = draft.account.model_overrides.get(model_id) {
-            overrides.apply(&mut model);
-        }
         if !known_blocks(&draft.account, &model).is_empty() {
             return Err(Fault::new(
                 400,
