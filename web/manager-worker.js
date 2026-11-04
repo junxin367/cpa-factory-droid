@@ -1,11 +1,15 @@
 "use strict";
 // Scope is /management.html. No API interception, response cache or credentials.
 const BOOTSTRAP = "/v0/resource/plugins/factory-droid/manager-bootstrap.js";
+let enabled = true;
+self.addEventListener("message", (event) => {
+  if (event.origin === self.location.origin && event.data?.type === "factory-enhancement-disable") enabled = false;
+});
 self.addEventListener("install", (event) => event.waitUntil(self.skipWaiting()));
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (event.request.method !== "GET" || event.request.mode !== "navigate" ||
+  if (!enabled || event.request.method !== "GET" || event.request.mode !== "navigate" ||
       url.origin !== self.location.origin || url.pathname !== "/management.html") return;
   event.respondWith((async () => {
     const original = await fetch(event.request);

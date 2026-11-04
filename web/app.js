@@ -214,7 +214,10 @@
             });
             label.textContent = "已启用，后续刷新自动加载";
           } else {
-            if (current) await current.unregister();
+            if (current) {
+              current.active?.postMessage({ type: "factory-enhancement-disable" });
+              await current.unregister();
+            }
             window.parent.__factoryDroidAutoBootstrap?.stop();
             label.textContent = "已关闭，下次刷新生效";
           }
