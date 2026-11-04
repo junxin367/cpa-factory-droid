@@ -24,6 +24,8 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
+UPSTREAM_ERROR_MESSAGE = ("thinking.display requires a compatible beta; "
+    "api_key=fk-local-integration-only; Bearer mock-access-private; 'private test conversation'")
 # 固定官方带原生插件能力的包；不接受 no-plugin 变体或动态 latest。
 HOST_PACKAGES = {
     "8.0.47": {
@@ -79,15 +81,19 @@ class Mock(BaseHTTPRequestHandler):
     inference_calls = 0
     upgrade_calls = 0
     lock = threading.Lock()
+    error_mode = None
+    error_status = 400
 
     def log_message(self, *_):
         pass
 
-    def reply(self, value, content_type="application/json"):
+    def reply(self, value, content_type="application/json", status=200, headers=None):
         raw = value.encode() if isinstance(value, str) else json.dumps(value).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -126,10 +132,57 @@ class Mock(BaseHTTPRequestHandler):
                 token.strip().lower() == "upgrade" for token in self.headers.get("Connection", "").split(",")
             ):
                 Mock.upgrade_calls += 1
+        if Mock.error_mode:
+            headers = {"Request-Id": "req_factory_diagnostic", "Retry-After": "7"}
+            if Mock.error_mode == "html":
+                return self.reply("<html>private proxy diagnostics</html>", "text/html", Mock.error_status, headers)
+            message = "L" * 40000 if Mock.error_mode == "oversized" else UPSTREAM_ERROR_MESSAGE
+            raw = json.dumps({"error": {"type": "invalid_request_error", "message": message,
+                "code": "invalid_feature_combination", "param": "thinking.display"},
+                "request_id": "req_factory_diagnostic"}).encode()
+            if Mock.error_mode in ("split", "stall"):
+                self.send_response(Mock.error_status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(raw[:12])
+                self.wfile.flush()
+                time.sleep(3.5 if Mock.error_mode == "stall" else 0.02)
+                try:
+                    self.wfile.write(raw[12:])
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+                return
+            return self.reply(raw.decode(), status=Mock.error_status, headers=headers)
+        if self.path.endswith("/messages"):
+            flags = set(self.headers.get("Anthropic-Beta", "").split(","))
+            required = []
+            if data.get("thinking", {}).get("display") == "updates":
+                required.append("thinking-display-updates-2026-08-18")
+            if data.get("thinking", {}).get("block_binding") is not None:
+                required.append("thinking-binding-controls-2026-08-01")
+            if data.get("context_management") is not None:
+                required.append("context-management-2025-06-27")
+            if any(tool.get("defer_loading") or tool.get("type", "").startswith("tool_search_tool_")
+                   for tool in data.get("tools", [])):
+                required.append("advanced-tool-use-2025-11-20")
+            for message in data.get("messages", []):
+                if message.get("role") == "system":
+                    required.append("mid-conversation-system-2026-04-07")
+                if message.get("output_config", {}).get("effort") is not None:
+                    required.append("mid-conversation-effort-2026-08-01")
+            if set(required) - flags or "betas" in data:
+                return self.reply({"error": {"type": "invalid_request_error",
+                    "message": "Messages feature beta missing or SDK-only betas body field present"}},
+                    status=400, headers={"Request-Id": "req_strict_contract"})
         probe = {"session": self.headers.get("x-session-id"), "cache": data.get("prompt_cache_key"),
             "safety": data.get("safety_identifier"), "input": data.get("input"), "messages": data.get("messages"),
             "conversation": data.get("conversation"), "previous_response_id": data.get("previous_response_id"),
             "metadata": data.get("metadata"), "cache_control": data.get("cache_control"),
+            "thinking": data.get("thinking"), "output_config": data.get("output_config"),
+            "tools": data.get("tools"), "betas": data.get("betas"),
             "user_agent": self.headers.get("User-Agent"), "forwarded": self.headers.get("X-Forwarded-For"),
             "wire_headers": {name: self.headers.get(name) for name in [
                 "Anthropic-Version", "Anthropic-Beta", "OpenAI-Beta", "X-Factory-Client",
@@ -163,10 +216,11 @@ class Mock(BaseHTTPRequestHandler):
 
 
 class CPARequestError(RuntimeError):
-    def __init__(self, path, status, code):
-        super().__init__(f"CPA {path} 返回 HTTP {status}")
+    def __init__(self, path, status, code, body=None):
+        super().__init__(f"CPA {path} 返回 HTTP {status}，错误码 {code}")
         self.status = status
         self.code = code
+        self.body = body
 
 
 def main():
@@ -269,10 +323,12 @@ routing:
                 if response.status >= 400:
                     # Do not expose credentials or upstream error bodies in diagnostics.
                     try:
-                        code = json.loads(raw).get("error", {}).get("code")
+                        error_body = json.loads(raw)
+                        code = error_body.get("error", {}).get("code")
                     except (ValueError, AttributeError):
                         code = None
-                    raise CPARequestError(path, response.status, code)
+                        error_body = None
+                    raise CPARequestError(path, response.status, code, error_body)
                 return raw.decode() if stream else json.loads(raw)
             finally:
                 connection.close()
@@ -372,7 +428,76 @@ routing:
         check("窗口统计模块已内嵌并可加载", "export function buildTargets" in usage_module)
         refresh_module = request("/v0/resource/plugins/factory-droid/manager-refresh.js", stream=True)
         check("进入页面刷新策略与相对重置时间模块已内嵌",
-              "ENTRY_REFRESH_INTERVAL = 180000" in refresh_module and "export function relativeReset" in refresh_module)
+              "ENTRY_REFRESH_INTERVAL = 180000" in refresh_module
+              and "export function relativeReset" in refresh_module
+              and "export function nextCycleRefreshAt" in refresh_module
+              and "export function nextCycleWakeAt" in refresh_module)
+        frontend_check = subprocess.run(["node", "--input-type=module", "-e", r"""
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+const root = new URL(process.argv[1]);
+const load = async (path) => import('data:text/javascript;base64,' + readFileSync(new URL(path, root)).toString('base64'));
+const { canRefreshOnEntry, isExpiredWindow, nextCycleRefreshAt, nextCycleWakeAt, relativeReset, restoreRefreshSnapshot } = await load('web/manager-refresh.js');
+const { normalizeQuota, buildTargets } = await load('web/manager-usage.js');
+const checks = [];
+const check = (name, fn) => { fn(); checks.push(name); };
+const now = Date.UTC(2026, 10, 4, 9);
+const ended = now - 1000, future = now + 7 * 86400000;
+const value = { attemptAt: now - 181000, windows: [{reset: ended}, {reset: future}] };
+check('周期结束安排一次官方刷新，不人为推移旧周期', () =>
+  assert.equal(nextCycleRefreshAt(value), ended));
+check('周期刷新继续遵守三分钟间隔', () => {
+  assert.equal(nextCycleRefreshAt({...value, attemptAt: now - 60000}), now + 120000);
+  assert.equal(canRefreshOnEntry(now - 60000, now), false);
+});
+check('周期结束时立即更新显示，不等待查询冷却结束', () => {
+  const expiring = {attemptAt:now,windows:[{reset:now+60000}]};
+  assert.equal(nextCycleWakeAt(expiring, new Set(), now), now+60000);
+  assert.equal(nextCycleWakeAt(expiring, new Set(), now+60001), now+180000);
+});
+check('同一周期失败或未变化不自动重复查询', () =>
+  assert.equal(nextCycleRefreshAt(value, new Set([ended])), future));
+check('周期查询进行中不再安排重复请求', () =>
+  assert.equal(nextCycleRefreshAt({...value, loading:true}), null));
+check('旧周期进入等待状态，不显示已到期或虚构新时间', () => {
+  assert.equal(relativeReset(ended, now), '等待新周期');
+  assert.equal(isExpiredWindow({reset: ended}, now), true);
+  assert.equal(isExpiredWindow({reset: future}, now), false);
+});
+check('新周期重新建立统计区间且不沿用旧消耗', () => {
+  const oldNow = Date.now;
+  Date.now = () => now;
+  try {
+    const account = {key:'fixture', index:'index', name:'fixture.json'};
+    const windows = normalizeQuota({ok:true, data:{provider:'factory-droid',
+      auth_index:account.index, name:account.name, observed_at_ms:now, forecast_eligible:true,
+      windows:[{group:'standard',window_key:'fiveHour',window_start:now-3600000,
+        window_end:now+14400000,reset_source:'window_end',remaining_fraction:0.88}]}}, account);
+    const earlier = {name:'5h',start:now-21600000,end:now-3600000,duration:18000000,
+      current:{total_cost:8.23,total_tokens:49800000}};
+    const targets = buildTargets(account, windows, [earlier]);
+    assert.equal(windows[0].reset, now+14400000);
+    assert.equal(windows[0].current, null);
+    assert.equal(windows[0].previousLabel, '上个窗口用量');
+    assert.equal(targets.find(v=>v.period==='current').from_ms, now-3600000);
+    assert.equal(targets.find(v=>v.period==='previous').to_ms, now-3600000);
+  } finally { Date.now=oldNow; }
+});
+check('月额度名称迁移保留已有快照和刷新间隔', () => {
+  const value = {at:now-1000,attemptAt:now-1000,error:'',usageError:'',
+    windows:[{name:'30d',label:'标准月额度',start:now-86400000,end:future,
+      reset:future,observedAt:now-1000,duration:2592000000,percent:98,
+      accuracy:'exact',forecastEligible:true,forecastReason:'',current:null,previous:null,
+      previousRange:null,previousLabel:'前一等长区间'}]};
+  const restored = restoreRefreshSnapshot(JSON.stringify({version:1,entries:[['fixture',value]]}),now);
+  assert.equal(restored[0][1].windows[0].label,'月额度');
+  assert.equal(restored[0][1].attemptAt,value.attemptAt);
+  assert.equal(canRefreshOnEntry(restored[0][1].attemptAt,now),false);
+});
+console.log(JSON.stringify(checks));
+""", ROOT.as_uri() + "/"], capture_output=True, text=True, encoding="utf-8", check=True)
+        for name in json.loads(frontend_check.stdout):
+            check(name, True)
         worker_headers = {}
         worker = request("/v0/resource/plugins/factory-droid/manager-worker.js", stream=True,
                          response_headers=worker_headers)
@@ -463,6 +588,129 @@ routing:
         check("反代升级标记不透传 Factory 上游", Mock.upgrade_calls == 0)
         cached = call(protocol="anthropic", cache_control={"type": "ephemeral", "ttl": "1h"})
         check("缓存断点原样保留", cached["cache_control"] == {"type": "ephemeral", "ttl": "1h"})
+
+        # Strict feature cases must fail against the pre-fix library: accepting
+        # arbitrary JSON in a mock cannot verify a body/header protocol contract.
+        feature_request = {
+            "thinking": {"type": "adaptive", "display": "updates",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"}},
+            "output_config": {"effort": "xhigh"},
+            "context_management": {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
+            "tools": [{"name": "read_file", "defer_loading": True,
+                "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+                {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}],
+            "messages": [
+                {"role": "user", "content": "Read the file"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Inspect the file", "signature": "opaque-signature-kept"},
+                    {"type": "tool_use", "id": "toolu_read1", "name": "read_file", "input": {"path": "README.md"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_read1",
+                    "content": [{"type": "text", "text": "File contents"}]}]},
+            ],
+            "betas": ["claude-code-20250219", "arbitrary-caller-beta"],
+        }
+        feature_probe = call(protocol="anthropic", **feature_request,
+            headers={"Anthropic-Beta": "claude-code-20250219,arbitrary-caller-beta"})
+        expected_flags = {"fine-grained-tool-streaming-2025-05-14",
+            "thinking-display-updates-2026-08-18", "thinking-binding-controls-2026-08-01",
+            "context-management-2025-06-27", "advanced-tool-use-2025-11-20"}
+        check("完整 Claude 工具请求按功能生成 beta 且保留原生内容",
+            set(feature_probe["wire_headers"]["Anthropic-Beta"].split(",")) == expected_flags
+            and feature_probe["messages"] == feature_request["messages"]
+            and feature_probe["thinking"] == feature_request["thinking"]
+            and feature_probe["output_config"] == feature_request["output_config"]
+            and feature_probe["tools"] == feature_request["tools"])
+        check("SDK betas 字段不作为请求体或调用者 Header 透传", feature_probe["betas"] is None)
+        check("完整 Claude 功能请求可通过严格上游 SSE 校验",
+            "message_stop" in call(protocol="anthropic", stream=True, **feature_request))
+        changed_turn = call(protocol="anthropic", messages=[
+            {"role": "system", "content": [{"type": "text", "text": "New instruction"}]},
+            {"role": "user", "content": "Continue", "output_config": {"effort": "high"}}])
+        check("中途系统消息与推理档位携带对应能力标志",
+            {"mid-conversation-system-2026-04-07", "mid-conversation-effort-2026-08-01"}
+            <= set(changed_turn["wire_headers"]["Anthropic-Beta"].split(",")))
+        before = Mock.inference_calls
+        try:
+            call(protocol="anthropic", fallbacks=[{"model": "unverified-model"}])
+        except CPARequestError as failure:
+            # CPA's Claude error writer retains only type/message for executor
+            # errors. Interceptor errors take its separate DirectResponse path.
+            rejected = failure.status == 400 and "fallback" in (failure.body or {}).get("error", {}).get("message", "")
+        else:
+            rejected = False
+        check("未实现的 fallback 在访问上游前明确拒绝", rejected and Mock.inference_calls == before)
+
+        count_path = "/v1/messages/count_tokens"
+        count_body = {"model": "factory/claude-opus-5-5", "messages": [{"role": "user", "content": "hello"}]}
+        before = Mock.inference_calls
+        counted = request(count_path, count_body, key=client)
+        check("真实 CPA token 计数入口返回明确的本地 O200k 估算",
+            counted.get("input_tokens") == 3 and counted.get("estimated") is True
+            and counted.get("estimator") == "o200k_base"
+            and counted.get("media_tokens_included") is False)
+        rich_count = request(count_path, {**count_body, "system": "You help with files.",
+            "tools": feature_request["tools"], "messages": feature_request["messages"]}, key=client)
+        check("token 估算覆盖 system 与工具历史且不发起推理",
+            rich_count["input_tokens"] > counted["input_tokens"] and Mock.inference_calls == before)
+        for name, body, key, expected_status in [
+            ("空消息", {**count_body, "messages": []}, client, 400),
+            ("流式计数", {**count_body, "stream": True}, client, 400),
+            ("未授权调用方", count_body, "invalid-local-test-client", 401),
+        ]:
+            try:
+                request(count_path, body, key=key)
+            except CPARequestError as failure:
+                rejected = failure.status == expected_status
+            else:
+                rejected = False
+            check(f"token 计数拒绝{name}且不访问上游", rejected and Mock.inference_calls == before)
+
+        try:
+            for mode, stream, protocol in [
+                ("json", False, "anthropic"), ("json", True, "anthropic"),
+                ("split", True, "anthropic"), ("html", False, "anthropic"),
+                ("oversized", True, "anthropic"), ("stall", True, "anthropic"),
+                ("json", False, "responses"), ("json", True, "responses"),
+                ("json", False, "chat"), ("json", True, "chat"),
+            ]:
+                Mock.error_mode = mode
+                started = time.monotonic()
+                try:
+                    call("private test conversation", protocol=protocol, stream=stream)
+                except CPARequestError as failure:
+                    error_body = failure.body or {}
+                    message = error_body.get("error", {}).get("message", "")
+                    valid = failure.status == 400 and len(message) <= 33000
+                    if mode in ("json", "split"):
+                        expected_message = UPSTREAM_ERROR_MESSAGE
+                        if protocol == "responses" and stream:
+                            # This transformation belongs to CPA v8.0.52's
+                            # Responses writer, after the plugin returns raw JSON.
+                            expected_message = expected_message.replace(
+                                "fk-local-integration-only", "[REDACTED]").replace(
+                                "mock-access-private", "[REDACTED]")
+                        valid &= message == expected_message
+                        valid &= error_body.get("error", {}).get("type") == "invalid_request_error"
+                        if protocol != "anthropic":
+                            if not (protocol == "responses" and stream):
+                                valid &= error_body.get("request_id") == "req_factory_diagnostic"
+                            valid &= failure.code == "invalid_feature_combination"
+                            valid &= error_body.get("error", {}).get("param") == "thinking.display"
+                    elif mode == "html":
+                        valid &= message == "<html>private proxy diagnostics</html>"
+                    elif mode == "oversized":
+                        valid &= message.endswith("[上游错误正文已达到 32 KiB 读取上限]")
+                else:
+                    valid = False
+                if mode == "stall":
+                    valid &= time.monotonic() - started < 5
+                label = (f"{protocol} 上游错误 {mode}/{'SSE' if stream else 'JSON'} 原因不脱敏不替换且读取有界"
+                    if not (protocol == "responses" and stream) else
+                    "Responses SSE 原始错误经过宿主自身脱敏的边界已验证")
+                check(label, valid)
+        finally:
+            Mock.error_mode = None
+        check("错误响应关闭后后续正常请求仍可调用", bool(call(protocol="anthropic")["session"]))
         stop()
         start()
         assert wait_until(lambda: "factory/gpt-5.4" in models())

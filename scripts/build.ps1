@@ -106,7 +106,20 @@ finally {
         if (-not $resolvedStage.StartsWith($resolvedBase + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
             throw "拒绝清理预期目录外的临时文件：$resolvedStage"
         }
-        Remove-Item -LiteralPath $resolvedStage -Recurse -Force
+        # Windows scanners can briefly hold a freshly packed DLL open. Retry
+        # only this verified staging directory; persistent failures still fail
+        # the build, rather than reporting a successful cleanup.
+        for ($cleanupAttempt = 0; $cleanupAttempt -lt 8; $cleanupAttempt++) {
+            try {
+                Remove-Item -LiteralPath $resolvedStage -Recurse -Force -ErrorAction Stop
+                break
+            }
+            catch {
+                if (-not (Test-Path -LiteralPath $resolvedStage)) { break }
+                if ($cleanupAttempt -eq 7 -or -not $IsWindows) { throw }
+                Start-Sleep -Milliseconds 250
+            }
+        }
     }
     Pop-Location
 }

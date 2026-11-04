@@ -1,5 +1,5 @@
 import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./manager-usage.js";
-import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefreshSnapshot, serializeRefreshSnapshot } from "./manager-refresh.js";
+import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, isExpiredWindow, nextCycleRefreshAt, nextCycleWakeAt, relativeReset, restoreRefreshSnapshot, serializeRefreshSnapshot } from "./manager-refresh.js";
 (() => {
   // Run in the parent's realm: the plugin iframe is destroyed on route changes.
   if (window.parent !== window || window.__factoryDroidQuotaEnhancement) return;
@@ -15,6 +15,8 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
   let pending = new Map();
   let pageRoute = "", accountsChecked = false;
   const checkedThisVisit = new Set();
+  const checkedCyclesThisVisit = new Map();
+  let cycleTimer = 0, cycleTimerAt = 0;
   let snapshotKey = "", snapshotReady = Promise.resolve();
 
   const accountsPage = () => /^#\/accounts(?:\?|$)/.test(location.hash);
@@ -24,6 +26,7 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     const route = active ? "accounts:" + provider : "";
     if (route !== pageRoute) {
       pageRoute = route; accountsChecked = false; checkedThisVisit.clear();
+      checkedCyclesThisVisit.clear(); clearCycleTimer();
     }
     return active;
   }
@@ -84,6 +87,7 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     if (snapshotKey) { try { sessionStorage.removeItem(snapshotKey); } catch { /* No storage access. */ } }
     snapshotKey = ""; snapshotReady = Promise.resolve();
     pageRoute = ""; accountsChecked = false; checkedThisVisit.clear();
+    checkedCyclesThisVisit.clear(); clearCycleTimer();
     token = ""; scope = ""; accountsAt = 0; accountsRequest = null;
     for (const controller of requests) controller.abort();
     requests.clear(); accounts.clear(); cache.clear(); pending = new Map();
@@ -174,6 +178,9 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     const account = accounts.get(key);
     const currentEpoch = epoch;
     const attemptAt = Date.now();
+    const attemptedResets = checkedCyclesThisVisit.get(key) || new Set();
+    for (const window of previous?.windows || []) if (isExpiredWindow(window, attemptAt)) attemptedResets.add(window.reset);
+    checkedCyclesThisVisit.set(key, attemptedResets);
     cache.set(key, { ...previous, attemptAt, loading: true, error: "", usageError: "", at: previous?.at || 0 });
     saveSnapshot();
     const task = new Promise((resolve) => queue.push({
@@ -218,10 +225,10 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     if (text !== undefined) node.textContent = text;
     return node;
   }
-  function icon() {
+  function icon(paths, size = "15") {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    for (const [key, value] of Object.entries({ width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) svg.setAttribute(key, value);
-    for (const d of ["M3 12a9 9 0 0 1 15.4-6.4L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-15.4 6.4L3 16", "M3 21v-5h5"]) {
+    for (const [key, value] of Object.entries({ width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) svg.setAttribute(key, value);
+    for (const d of paths || ["M3 12a9 9 0 0 1 15.4-6.4L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-15.4 6.4L3 16", "M3 21v-5h5"]) {
       const path = document.createElementNS(svg.namespaceURI, "path");
       path.setAttribute("d", d); svg.append(path);
     }
@@ -249,15 +256,17 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
   const compactNumber = (number) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(number);
   const money = (number) => "$" + new Intl.NumberFormat("en-US", { notation: number >= 1000 ? "compact" : "standard", maximumFractionDigits: 2, minimumFractionDigits: number >= 1000 ? 0 : 2 }).format(number);
   const dateLabel = (ms) => ms ? new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
-  function resetLabel(reset) {
-    const label = element("span", "fd-quota-reset", relativeReset(reset));
-    label.title = "重置时间：" + new Date(reset).toLocaleString("zh-CN", {
+  function resetLabel(reset, loading = false) {
+    const expired = reset <= Date.now();
+    const label = element("span", "fd-quota-reset", expired && loading ? "正在同步…" : relativeReset(reset));
+    label.title = (expired ? "等待官方返回新周期；上次重置时间：" : "重置时间：") + new Date(reset).toLocaleString("zh-CN", {
       year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
     });
     label.setAttribute("aria-label", label.textContent + "，" + label.title);
     return label;
   }
   function emptyUsage(window, value, usage) {
+    if (isExpiredWindow(window)) return value.loading ? "正在同步新周期…" : "新周期数据待更新";
     if (!window.start) return "窗口边界未返回";
     if (value.usageLoading) return "正在同步…";
     if (value.usageError) return "统计读取失败";
@@ -290,6 +299,19 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     }
     return column;
   }
+  function usageAmount(kind, cost, tokens, title) {
+    const label = element("span", "fd-usage-group fd-usage-" + kind);
+    const marker = element("span", "fd-usage-icon");
+    marker.append(icon(kind === "actual"
+      ? ["M3 3v18h18", "m7 14 4-4 4 3 5-7"]
+      : ["m3 17 6-6 4 4 8-10", "M15 5h6v6"], "10"));
+    marker.setAttribute("aria-hidden", "true");
+    label.append(marker, element("span", "fd-usage-cost", money(cost)),
+      element("span", "fd-usage-slash", "/"), element("span", "fd-usage-tokens", compactNumber(tokens)));
+    label.title = title;
+    label.setAttribute("aria-label", `${kind === "actual" ? "已用" : "预测"} ${money(cost)}，${compactNumber(tokens)} Token`);
+    return label;
+  }
   function renderQuota(root, key) {
     const value = cache.get(key) || {};
     const detail = root.classList.contains("fd-quota-detail");
@@ -300,26 +322,28 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     for (const item of value.windows || []) {
       const row = element("div", "fd-quota-window");
       row.dataset.window = item.name;
-      const used = actual(item.current);
+      const expired = isExpiredWindow(item);
+      const used = expired ? null : actual(item.current);
+      const percent = expired ? null : item.percent;
       const predicted = forecast(item, { stale: Boolean(value.error || value.loading), usageError: value.usageError });
       const header = element("div", "fd-quota-header");
-      header.append(element("span", "fd-quota-label", item.label), element("strong", "", item.percent === null ? "—" : `剩余 ${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(item.percent)}%`));
-      if (detail && item.reset) header.insertBefore(resetLabel(item.reset), header.lastChild);
+      header.append(element("span", "fd-quota-label", item.label), element("strong", "", percent === null ? "—" : `剩余 ${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(percent)}%`));
+      if (detail && item.reset) header.insertBefore(resetLabel(item.reset, value.loading), header.lastChild);
       const track = element("div", "fd-quota-track");
       track.setAttribute("role", "progressbar");
       track.setAttribute("aria-label", item.label + "剩余额度");
       track.setAttribute("aria-valuemin", "0"); track.setAttribute("aria-valuemax", "100");
-      if (item.percent !== null) track.setAttribute("aria-valuenow", String(item.percent));
+      if (percent !== null) track.setAttribute("aria-valuenow", String(percent));
       else track.setAttribute("aria-valuetext", "未知");
       const bar = element("span", "fd-quota-bar");
-      bar.style.width = `${item.percent ?? 0}%`;
-      bar.dataset.tone = item.percent === null ? "neutral" : item.percent <= 0 ? "bad" : item.percent < 20 ? "warn" : "good";
+      bar.style.width = `${percent ?? 0}%`;
+      bar.dataset.tone = percent === null ? "neutral" : percent <= 0 ? "bad" : percent < 20 ? "warn" : "good";
       track.append(bar); row.append(header, track);
       if (detail) {
         const columns = element("div", "fd-usage-columns");
         columns.append(
           usageColumn(item.previousLabel, item.previousRange ? `${dateLabel(item.previousRange.from)} — ${dateLabel(item.previousRange.to)}` : "—", actual(item.previous), null, emptyUsage(item, value, item.previous), "previous"),
-          usageColumn("当前窗口已用", item.start ? `${dateLabel(item.start)} — ${dateLabel(item.end)}` : "—", used, null, emptyUsage(item, value, item.current), "current"),
+          usageColumn("当前窗口已用", !expired && item.start ? `${dateLabel(item.start)} — ${dateLabel(item.end)}` : "—", used, null, emptyUsage(item, value, item.current), "current"),
           usageColumn("当前窗口预测", "按额度消耗比例估算", null, predicted, forecastEmpty(item, value), "forecast")
         );
         row.append(columns);
@@ -330,17 +354,15 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
         const line = element("div", "fd-usage-inline");
         const amounts = element("span", "fd-usage-amounts");
         if (used) {
-          const actualLabel = element("span", "fd-usage-actual", `已用 ${money(used.total_cost)} / ${compactNumber(used.total_tokens)}`);
-          actualLabel.title = `当前窗口 CPA 用量：${used.total_tokens.toLocaleString("zh-CN")} Token；费用采用 Manager 统一价格。`;
-          amounts.append(actualLabel);
+          amounts.append(usageAmount("actual", used.total_cost, used.total_tokens,
+            `当前窗口 CPA 用量：${used.total_tokens.toLocaleString("zh-CN")} Token；费用采用 Manager 统一价格。`));
         } else amounts.append(element("span", "fd-quota-meta", emptyUsage(item, value, item.current)));
         if (predicted) {
-          const predictedLabel = element("span", "fd-usage-prediction", `预测 ${money(predicted.cost)} / ${compactNumber(predicted.tokens)}`);
-          predictedLabel.title = "按本 CPA 已用量 ÷ 额度消耗比例估算窗口总容量，非官方余额。";
-          amounts.append(predictedLabel);
+          amounts.append(usageAmount("prediction", predicted.cost, predicted.tokens,
+            "按本 CPA 已用量 ÷ 额度消耗比例估算窗口总容量，非官方余额。"));
         }
         line.append(amounts);
-        if (item.reset) line.append(resetLabel(item.reset));
+        if (item.reset) line.append(resetLabel(item.reset, value.loading));
         row.append(line);
       }
       content.append(row);
@@ -371,16 +393,18 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
         trigger.factoryQuotaLabels = { title: trigger.getAttribute("title"), "aria-label": trigger.getAttribute("aria-label") };
         trigger.setAttribute("data-factory-quota-label", "");
       }
-      const label = "查看 Factory 标准额度 · " + value.windows.map((item) => `${item.label}：${item.percent === null ? "未知" : `剩余 ${Math.round(item.percent * 10) / 10}%`}`).join(" · ");
+      const label = "查看 Factory 标准额度 · " + value.windows.map((item) => `${item.label}：${isExpiredWindow(item) ? "新周期待更新" : item.percent === null ? "未知" : `剩余 ${Math.round(item.percent * 10) / 10}%`}`).join(" · ");
       if (trigger.title !== label) trigger.title = label;
       if (trigger.getAttribute("aria-label") !== label) trigger.setAttribute("aria-label", label);
     }
   }
   function scan() {
     if (!authorized() || !accountsPage()) return;
+    const visibleKeys = new Set();
     for (const card of document.querySelectorAll("article[data-account-card]")) {
       const key = card.getAttribute("data-account-card");
       if (!accounts.has(key)) continue;
+      visibleKeys.add(key);
       ensureButton(card.querySelector('[class*="accountGridCardPrimaryActions"], [class*="accountQuickActionsGrid"]'), key, true);
       const empty = card.querySelector("[data-account-quota-empty]");
       if (empty) {
@@ -391,6 +415,8 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     }
     const params = new URLSearchParams(location.hash.split("?")[1] || "");
     const key = params.get("account");
+    if (accounts.has(key)) visibleKeys.add(key);
+    planCycleRefresh(visibleKeys);
     if (!accounts.has(key)) return;
     const provider = document.querySelector('[data-account-provider-icon="factory-droid"]');
     const drawer = provider?.closest('[role="dialog"]');
@@ -415,6 +441,30 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     if (checkedThisVisit.has(key)) return;
     checkedThisVisit.add(key);
     void refresh(key);
+  }
+  function clearCycleTimer() {
+    if (cycleTimer) clearTimeout(cycleTimer);
+    cycleTimer = 0; cycleTimerAt = 0;
+  }
+  function planCycleRefresh(keys) {
+    if (document.visibilityState === "hidden") { clearCycleTimer(); return; }
+    let nextAt = Infinity;
+    const now = Date.now();
+    for (const key of keys) {
+      const due = nextCycleRefreshAt(cache.get(key), checkedCyclesThisVisit.get(key));
+      if (due !== null && due <= now) void refresh(key);
+      // Render the boundary even if the request is still in its cooldown:
+      // old usage must disappear as soon as its observed cycle has ended.
+      const wake = nextCycleWakeAt(cache.get(key), checkedCyclesThisVisit.get(key), now);
+      if (wake !== null && wake > now) nextAt = Math.min(nextAt, wake);
+    }
+    if (!Number.isFinite(nextAt)) { clearCycleTimer(); return; }
+    if (cycleTimer && cycleTimerAt === nextAt) return;
+    clearCycleTimer();
+    cycleTimerAt = nextAt;
+    cycleTimer = setTimeout(() => {
+      cycleTimer = 0; cycleTimerAt = 0; schedule();
+    }, Math.min(2147483647, Math.max(1, nextAt - Date.now() + 25)));
   }
   async function refreshVisibleAccounts() {
     if (!accountsPage() || !authorized()) return;
@@ -456,14 +506,18 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
   addEventListener("popstate", routeChanged);
   addEventListener("storage", (event) => { if (event.key === "cli-proxy-auth" || event.key === null) { authorized(); schedule(); } });
   addEventListener("unauthorized", disconnect);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") clearCycleTimer();
+    else schedule();
+  });
   document.addEventListener("click", (event) => {
     const button = event.target.closest?.("button");
     if (!button || button.hasAttribute(OWN)) return;
     const label = button.getAttribute("aria-label") || button.title || button.textContent.trim();
     if (label === "刷新" || label === "刷新全部") void refreshVisibleAccounts();
   });
-  // No interval: staying on the page, DOM updates and returning to this tab
-  // cannot refresh quota. Only entering the account page or an explicit click can.
+  // No polling interval. In addition to entry/manual refresh, an observed
+  // cycle boundary permits one refresh, respecting the same 3-minute cooldown.
   const stylesheet = document.createElement("link");
   stylesheet.rel = "stylesheet";
   stylesheet.href = new URL("manager-extension.css", import.meta.url).href;

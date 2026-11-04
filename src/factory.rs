@@ -512,9 +512,9 @@ pub fn llm_request(
         _ => "/api/llm/o/v1/chat/completions",
     };
     let mut h = headers(rt, cred);
-    wire::apply_protocol_defaults(&mut h, model);
     let identity = wire::identity(rt, cred, native_headers, metadata, request)?;
     let request = wire::payload(request, model, &identity)?;
+    wire::apply_protocol_defaults(&mut h, model, &request)?;
     h["Content-Type"] = json!(["application/json"]);
     h["x-api-provider"] = json!([model.upstream_provider]);
     h["x-session-id"] = json!([identity.session]);
@@ -530,6 +530,7 @@ pub fn llm_request(
 }
 pub fn upstream_error(status: u16, headers: &Value) -> Fault {
     let message = match status {
+        400 => "Factory 拒绝请求（HTTP 400）",
         401 => "Factory 凭据已失效，请检查 API Key 或重新授权",
         403 => "Factory 拒绝请求：请检查账号模型权限、组织或请求内容",
         404 => "Factory 模型或接口不存在，请检查模型映射",

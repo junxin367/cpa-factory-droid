@@ -90,3 +90,15 @@ data: {"value":"x"}
 原生 usage 交给 CPA 统计及其管理端计价，插件不再重复记账。调用仍要求凭据启用、模型存在于其发布目录且协议匹配；未发布的路由返回 `model_not_allowed`。目录同步不执行付费推理。
 
 401 表示凭据验证失败；403 可能涉及账号、模型或组织权限；413 表示请求过大；429 保留可取得的 `Retry-After`。官方额度或 Analytics 不可读取与模型请求权限分开判断。
+
+HTTP 非成功响应保留原状态。插件最多读取 32 KiB 错误正文：完整 JSON 对象原文交给宿主，非 JSON 正文作为错误消息显示，不脱敏、不加译文前缀、不替换上游错误原因。达到大小上限时保留已读内容并标记截断；没有正文时才使用通用提示。错误响应流最多等待 2 秒并始终关闭，不影响其他请求。已有 HTTP 200 SSE 中的原生 error 事件仍遵循上文的原生事件转发规则。
+
+CPA v8.0.52 的 Claude 错误处理会将执行器错误重组为 `type: error` 外壳，只保留源错误的 `type` 和 `message`；`code`、`param`、`request_id` 等附加 JSON 字段可能被宿主移除。Chat 与非流式 Responses 路径保留完整 JSON 错误对象。Responses 流式错误会在宿主内再次脱敏、限长，并移除部分外层字段；这是 `sanitizeResponsesStreamErrorMessage` 的宿主行为，插件原样返回错误也不能绕过。真实 CPA 验证分别断言各入口的实际行为，不声称所有入口端到端不变；本插件不修改 CPA 内核。
+
+## Messages token 计数
+
+`POST /v1/messages/count_tokens` 支持非流式本地估算，遵循与生成请求相同的调用方鉴权、凭据启用及模型访问校验；一次性路径凭证不能在计数与生成入口之间复用。
+
+参考 CPA 对第三方 Claude 网关的处理，使用内嵌 O200k tokenizer，收集 system、消息文本、思考文本、工具定义、工具调用及嵌套结果。返回标准 `input_tokens`，并附加 `estimated: true`、`estimator: "o200k_base"`、`media_tokens_included: false`。不会调用 Factory 推理或计费接口，也不向 CPA 发布生成用量。单次计数请求上限 16 MiB。
+
+这是文本估算，不是 Factory 官方精确计数：图片、音频、视频、PDF 二进制、加密或脱敏思考内容不计入；JSON 对象采用本插件的序列化顺序。不能用于结算或保证请求一定未超过上游上下文限制。

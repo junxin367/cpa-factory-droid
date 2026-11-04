@@ -4,10 +4,32 @@ export function canRefreshOnEntry(lastAttempt, now = Date.now()) {
   return !(Number.isFinite(lastAttempt) && lastAttempt > 0 && now - lastAttempt < ENTRY_REFRESH_INTERVAL);
 }
 
+export function isExpiredWindow(window, now = Date.now()) {
+  return Number.isFinite(window?.reset) && window.reset > 0 && window.reset <= now;
+}
+
+// One refresh at a known cycle boundary, not an interval. A failed/unchanged
+// boundary is marked by the caller and is not retried during the same visit.
+export function nextCycleRefreshAt(value, attemptedResets = new Set()) {
+  if (!value || value.loading || value.usageLoading) return null;
+  const cooldown = Number.isFinite(value.attemptAt) ? value.attemptAt + ENTRY_REFRESH_INTERVAL : 0;
+  const resets = (value.windows || []).map((window) => window.reset)
+    .filter((reset) => Number.isFinite(reset) && reset > 0 && !attemptedResets.has(reset));
+  return resets.length ? Math.max(Math.min(...resets), cooldown) : null;
+}
+
+export function nextCycleWakeAt(value, attemptedResets = new Set(), now = Date.now()) {
+  const refresh = nextCycleRefreshAt(value, attemptedResets);
+  const boundaries = (value?.windows || []).map((window) => window.reset)
+    .filter((reset) => Number.isFinite(reset) && reset > now);
+  if (refresh !== null) boundaries.push(refresh);
+  return boundaries.length ? Math.min(...boundaries) : null;
+}
+
 export function relativeReset(reset, now = Date.now()) {
   if (!Number.isFinite(reset) || reset <= 0) return "";
   const remaining = reset - now;
-  if (remaining <= 0) return "已到期";
+  if (remaining <= 0) return "等待新周期";
   if (remaining >= 86400000) return `${Math.floor(remaining / 86400000)} 天后`;
   if (remaining >= 3600000) return `${Math.floor(remaining / 3600000)} 小时后`;
   if (remaining >= 60000) return `${Math.floor(remaining / 60000)} 分钟后`;
@@ -16,7 +38,7 @@ export function relativeReset(reset, now = Date.now()) {
 
 const validNumber = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 const validTime = (value) => value === null || validNumber(value) && value <= 8640000000000000;
-const labels = { "5h": "5 小时", "7d": "7 天", "30d": "标准月额度" };
+const labels = { "5h": "5 小时", "7d": "7 天", "30d": "月额度" };
 function validUsage(usage) {
   return usage === null || usage && typeof usage === "object" &&
     ["total_requests", "total_tokens", "total_cost", "success_calls", "failure_calls"].every((key) => validNumber(usage[key])) &&
@@ -40,7 +62,8 @@ export function restoreRefreshSnapshot(raw, now = Date.now()) {
       if (!Array.isArray(value.windows) || value.windows.length > 3) return false;
       if (![value.error, value.usageError].every((text) => typeof text === "string" && text.length <= 500)) return false;
       return value.windows.every((window) =>
-        Object.hasOwn(labels, window.name) && window.label === labels[window.name] &&
+        Object.hasOwn(labels, window.name) &&
+        (window.label === labels[window.name] || window.name === "30d" && window.label === "标准月额度") &&
         [window.start, window.end, window.reset, window.observedAt].every(validTime) &&
         validNumber(window.duration) && window.duration > 0 &&
         (window.percent === null || validNumber(window.percent) && window.percent <= 100) &&
@@ -50,7 +73,10 @@ export function restoreRefreshSnapshot(raw, now = Date.now()) {
         (window.previousRange === null || window.previousRange && validTime(window.previousRange.from) && validTime(window.previousRange.to)) &&
         validUsage(window.current) && validUsage(window.previous)
       );
-    }).map(([key, value]) => [key, { ...value, loading: false, usageLoading: false }]);
+    }).map(([key, value]) => [key, {
+      ...value, windows: value.windows.map((window) => ({ ...window, label: labels[window.name] })),
+      loading: false, usageLoading: false
+    }]);
   } catch { return []; }
 }
 

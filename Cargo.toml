@@ -1,6 +1,6 @@
 [package]
 name = "cpa-factory-droid"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 rust-version = "1.85"
 description = "Factory Droid native provider plugin for CLIProxyAPI"
@@ -18,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 serde_yaml = "0.9"
 sha2 = "0.11"
+tiktoken-rs = "0.12.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 

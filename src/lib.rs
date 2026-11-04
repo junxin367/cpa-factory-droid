@@ -10,6 +10,8 @@ mod pricing;
 mod protocol;
 mod quota_window_usage;
 mod state;
+mod tokens;
+mod upstream;
 mod wire;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,12 @@ pub struct Fault {
     pub http_status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip)]
+    pub response_body: Option<String>,
 }
 impl Fault {
     pub fn new(status: u16, code: &str, message: &str) -> Self {
@@ -49,6 +57,9 @@ impl Fault {
             message: message.into(),
             http_status: status,
             retry_after_seconds: None,
+            upstream_type: None,
+            request_id: None,
+            response_body: None,
         }
     }
     pub fn input(message: &str) -> Self {
@@ -657,17 +668,7 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
         }),
         "executor.execute" => execute(&runtime()?, data, false).map_err(guard::http_fault),
         "executor.execute_stream" => execute(&runtime()?, data, true).map_err(guard::http_fault),
-        "executor.count_tokens" => {
-            let rt = runtime()?;
-            let model = rt.model(data["Model"].as_str().unwrap_or(""))?;
-            guard::validate(&rt, data, protocol::Format::for_model(&model)?)
-                .map_err(guard::http_fault)?;
-            Err(guard::http_fault(Fault::new(
-                501,
-                "count_tokens_unavailable",
-                "Factory 未提供此模型的通用精确 token 计数接口",
-            )))
-        }
+        "executor.count_tokens" => tokens::execute(&runtime()?, data).map_err(guard::http_fault),
         "executor.http_request" => Err(guard::http_fault(Fault::new(
             400,
             "unsupported_operation",
@@ -748,7 +749,11 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
         let code = response["StatusCode"].as_u64().unwrap_or(502) as u16;
         if !(200..300).contains(&code) {
             access::invalidate_upstream(rt, &cred, &model, code);
-            return Err(factory::upstream_error(code, &response["Headers"]));
+            return Err(upstream::fault(
+                code,
+                &response["Headers"],
+                &upstream::body_prefix(&response["Body"]),
+            ));
         }
         let body = decode(&response["Body"])?;
         protocol::validate_response(&body, format)?;
@@ -761,13 +766,8 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
     let upstream_stream = response["stream_id"].as_str().unwrap_or("").to_string();
     if !(200..300).contains(&code) {
         access::invalidate_upstream(rt, &cred, &model, code);
-        if !upstream_stream.is_empty() {
-            let _ = rt.host.call(
-                "host.http.stream_close",
-                &json!({"stream_id":upstream_stream}),
-            );
-        }
-        return Err(factory::upstream_error(code, &response["headers"]));
+        let body = upstream::read_error_stream(rt.host, &upstream_stream);
+        return Err(upstream::fault(code, &response["headers"], &body));
     }
     if upstream_stream.is_empty() {
         return Err(Fault::new(

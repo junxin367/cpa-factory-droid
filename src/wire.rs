@@ -315,6 +315,11 @@ pub fn payload(request: &Value, model: &Model, identity: &Identity) -> Result<Va
     // Only envelope metadata is removed. Messages, tool schemas, tool results,
     // signatures, encrypted reasoning and native continuation IDs remain opaque.
     fields.retain(|name, _| !transport_field(name));
+    if model.protocol == "anthropic" {
+        // SDK transport options are not Messages API body fields. Capability
+        // headers below are derived from supported payload features, never copied.
+        fields.remove("betas");
+    }
     let cache = fields.remove("prompt_cache_key").is_some();
     let safety = fields.remove("safety_identifier").is_some();
     let openai_responses = model.protocol == "responses" && model.upstream_provider == "openai";
@@ -327,14 +332,132 @@ pub fn payload(request: &Value, model: &Model, identity: &Identity) -> Result<Va
     Ok(payload)
 }
 
-pub fn apply_protocol_defaults(headers: &mut Value, model: &Model) {
-    // Captured Factory CLI 1.2.0 defaults, not caller-provided Claude Code headers.
-    // Fallback betas require the CLI's fallback payload flow, which we do not enable.
+fn beta(flags: &mut Vec<&'static str>, value: &'static str) {
+    if !flags.contains(&value) {
+        flags.push(value);
+    }
+}
+
+fn cache_beta(value: &Value, flags: &mut Vec<&'static str>) {
+    if !value["cache_control"]["scope"].is_null() {
+        beta(flags, "prompt-caching-scope-2026-01-05");
+    }
+}
+
+fn tool_betas(tool: &Value, flags: &mut Vec<&'static str>) {
+    cache_beta(tool, flags);
+    let kind = tool["type"].as_str().unwrap_or("");
+    if kind.starts_with("tool_search_tool_")
+        || tool["defer_loading"].as_bool() == Some(true)
+        || !tool["input_examples"].is_null()
+        || !tool["allowed_callers"].is_null()
+    {
+        beta(flags, "advanced-tool-use-2025-11-20");
+    }
+    if kind.starts_with("advisor_") {
+        beta(flags, "advisor-tool-2026-03-01");
+    }
+}
+
+fn content_betas(content: &Value, flags: &mut Vec<&'static str>) {
+    if let Some(parts) = content.as_array() {
+        for part in parts {
+            content_betas(part, flags);
+        }
+        return;
+    }
+    cache_beta(content, flags);
+    match content["type"].as_str().unwrap_or("") {
+        "tool_reference" => beta(flags, "advanced-tool-use-2025-11-20"),
+        "tool_addition" => {
+            beta(flags, "mid-conversation-tool-changes-2026-07-01");
+            beta(flags, "inline-tools-2026-09-15");
+            tool_betas(&content["tool"]["definition"], flags);
+        }
+        "tool_result" | "mcp_tool_result" => content_betas(&content["content"], flags),
+        _ => {}
+    }
+}
+
+pub fn apply_protocol_defaults(headers: &mut Value, model: &Model, payload: &Value) -> Result<()> {
+    // Identity/version defaults follow Factory CLI 1.2.0. Its feature flags
+    // change with the request: e.g. thinking.display=updates and per-turn effort.
+    // Native Claude features use an explicit protocol allowlist like CPA's Claude
+    // executor. Caller headers and body "betas" never select upstream flags.
     if model.protocol == "anthropic" {
+        if payload["fallbacks"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty())
+            || !payload["fallback_credit_token"].is_null()
+        {
+            return Err(Fault::new(
+                400,
+                "unsupported_native_feature",
+                "Factory 插件尚未启用跨模型 fallback，请移除 fallbacks / fallback_credit_token",
+            ));
+        }
+        let mut flags = vec![ANTHROPIC_BETA];
+        if payload["thinking"]["type"].as_str() == Some("enabled") {
+            beta(&mut flags, "interleaved-thinking-2025-05-14");
+        }
+        if payload["thinking"]["display"].as_str() == Some("updates") {
+            beta(&mut flags, "thinking-display-updates-2026-08-18");
+        }
+        if !payload["thinking"]["block_binding"].is_null() {
+            beta(&mut flags, "thinking-binding-controls-2026-08-01");
+        }
+        if payload["speed"].as_str() == Some("fast") {
+            beta(&mut flags, "fast-mode-2026-02-01");
+        }
+        for (field, flag) in [
+            ("context_management", "context-management-2025-06-27"),
+            ("diagnostics", "cache-diagnosis-2026-04-07"),
+            ("safeguards", "dangerous-tool-use-2026-09-03"),
+            ("output_format", "structured-outputs-2025-12-15"),
+        ] {
+            if !payload[field].is_null() {
+                beta(&mut flags, flag);
+            }
+        }
+        if !payload["output_config"]["timing"].is_null() {
+            beta(&mut flags, "timing-2026-09-09");
+        }
+        cache_beta(payload, &mut flags);
+        content_betas(&payload["system"], &mut flags);
+        for tool in payload["tools"].as_array().into_iter().flatten() {
+            tool_betas(tool, &mut flags);
+        }
+        for message in payload["messages"].as_array().into_iter().flatten() {
+            if message["role"].as_str() == Some("system") {
+                beta(&mut flags, "mid-conversation-system-2026-04-07");
+            }
+            if !message["clear_at"].is_null() {
+                beta(&mut flags, "mid-conversation-system-clear-at-2026-08-21");
+            }
+            if !message["tools"].is_null() {
+                beta(&mut flags, "mid-conversation-tool-changes-2026-07-01");
+            }
+            if !message["output_config"]["effort"].is_null() {
+                beta(&mut flags, "mid-conversation-effort-2026-08-01");
+            }
+            if !message["output_config"]["timing"].is_null() {
+                beta(&mut flags, "timing-2026-09-09");
+            }
+            content_betas(&message["content"], &mut flags);
+        }
         headers["anthropic-version"] = json!([ANTHROPIC_VERSION]);
-        headers["anthropic-beta"] = json!([ANTHROPIC_BETA]);
+        headers["anthropic-beta"] = json!([flags.join(",")]);
     }
     crate::catalog::apply_required_headers(headers, model);
+    if let Some(values) = headers["anthropic-beta"].as_array() {
+        let joined = values
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        headers["anthropic-beta"] = json!([joined]);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -349,7 +472,7 @@ mod tests {
             ..Model::default()
         };
         let mut outgoing = json!({});
-        apply_protocol_defaults(&mut outgoing, &model);
+        apply_protocol_defaults(&mut outgoing, &model, &json!({})).unwrap();
         assert_eq!(outgoing["anthropic-version"], json!(["2023-06-01"]));
         assert_eq!(
             outgoing["anthropic-beta"],
@@ -367,13 +490,10 @@ mod tests {
             ..Model::default()
         };
         let mut outgoing = json!({});
-        apply_protocol_defaults(&mut outgoing, &model);
+        apply_protocol_defaults(&mut outgoing, &model, &json!({})).unwrap();
         assert_eq!(
             outgoing["anthropic-beta"],
-            json!([
-                "fine-grained-tool-streaming-2025-05-14",
-                "fast-mode-2026-02-01"
-            ])
+            json!(["fine-grained-tool-streaming-2025-05-14,fast-mode-2026-02-01"])
         );
     }
 
@@ -385,9 +505,38 @@ mod tests {
                 ..Model::default()
             };
             let mut outgoing = json!({});
-            apply_protocol_defaults(&mut outgoing, &model);
+            apply_protocol_defaults(&mut outgoing, &model, &json!({})).unwrap();
             assert_eq!(outgoing, json!({}));
         }
+    }
+
+    #[test]
+    fn feature_flags_follow_protocol_fields_not_client_headers_or_tool_arguments() {
+        let model = Model {
+            protocol: "anthropic".into(),
+            upstream_provider: "anthropic".into(),
+            ..Model::default()
+        };
+        let mut headers = json!({});
+        apply_protocol_defaults(&mut headers, &model, &json!({
+            "thinking":{"type":"adaptive","display":"updates"},
+            "output_config":{"effort":"xhigh"},
+            "context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},
+            "betas":["claude-code-20250219","untrusted-client-beta"],
+            "tools":[{"name":"plain","input_schema":{"thinking":{"display":"updates"}}}],
+            "messages":[{"role":"assistant","content":[{"type":"tool_use","input":{"diagnostics":{},"safeguards":{}}}]}]
+        })).unwrap();
+        assert_eq!(headers["anthropic-beta"], json!([
+            "fine-grained-tool-streaming-2025-05-14,thinking-display-updates-2026-08-18,context-management-2025-06-27"]));
+        let mut ordinary = json!({});
+        apply_protocol_defaults(
+            &mut ordinary,
+            &model,
+            &json!({"thinking":{"type":"adaptive"},
+            "output_config":{"effort":"xhigh"}}),
+        )
+        .unwrap();
+        assert_eq!(ordinary["anthropic-beta"], json!([ANTHROPIC_BETA]));
     }
 
     fn ids() -> Identifiers {

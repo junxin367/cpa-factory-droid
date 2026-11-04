@@ -2,7 +2,7 @@
 // https://github.com/seakee/CPA-Manager-Plus (MIT); see docs/integrations/cpa-manager-plus.
 const DURATIONS = { fiveHour: 18000000, weekly: 604800000, monthly: 2592000000 };
 const NAMES = { fiveHour: "5h", weekly: "7d", monthly: "30d" };
-const LABELS = { fiveHour: "5 小时", weekly: "7 天", monthly: "标准月额度" };
+const LABELS = { fiveHour: "5 小时", weekly: "7 天", monthly: "月额度" };
 const finite = (value) => typeof value === "number" && Number.isFinite(value);
 const timestamp = (value) => {
   const parsed = typeof value === "number" ? value : typeof value === "string" && value ? Date.parse(value) : NaN;

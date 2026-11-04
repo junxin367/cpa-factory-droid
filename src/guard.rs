@@ -11,6 +11,7 @@ use crate::{host::encode, protocol::Format, Fault, Result, Runtime, PROVIDER};
 pub const HEADER: &str = "X-Factory-Droid-Approval";
 const MAX_APPROVALS: usize = 4096;
 const TTL: Duration = Duration::from_secs(60);
+const COUNT_PATH: &str = "/v1/messages/count_tokens";
 
 struct Approval {
     auth_id: String,
@@ -58,7 +59,7 @@ impl Approvals {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
-    fn consume(&mut self, nonce: &str, data: &Value, expected: Format) -> Result<()> {
+    fn consume(&mut self, nonce: &str, data: &Value, expected: Format, path: &str) -> Result<()> {
         let approved = self.entries.remove(nonce).ok_or_else(missing)?;
         if approved.created.elapsed() >= TTL
             || data["AuthID"].as_str() != Some(&approved.auth_id)
@@ -66,7 +67,7 @@ impl Approvals {
             || data["SourceFormat"].as_str() != Some(&approved.source)
             || approved.source != expected.cpa()
             || data["Metadata"]["request_path"].as_str() != Some(&approved.path)
-            || approved.path != expected.endpoint()
+            || approved.path != path
             || data["Stream"].as_bool().unwrap_or(false) != approved.stream
         {
             return Err(missing());
@@ -82,11 +83,31 @@ fn missing() -> Fault {
     )
 }
 pub fn error_body(error: &Fault) -> Value {
-    json!({"error":{"type":if error.http_status>=500{"api_error"}else{"invalid_request_error"},
-        "code":error.code,"message":error.message}})
+    let kind = match error.http_status {
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        529 => "overloaded_error",
+        500..=599 => "api_error",
+        _ => "invalid_request_error",
+    };
+    let kind = error.upstream_type.as_deref().unwrap_or(kind);
+    let mut body = json!({"error":{"type":kind,"code":error.code,"message":error.message}});
+    if let Some(kind) = &error.upstream_type {
+        body["error"]["upstream_type"] = json!(kind);
+    }
+    if let Some(id) = &error.request_id {
+        body["request_id"] = json!(id);
+    }
+    body
 }
 pub fn http_fault(mut error: Fault) -> Fault {
-    error.message = error_body(&error).to_string();
+    error.message = error
+        .response_body
+        .take()
+        .unwrap_or_else(|| error_body(&error).to_string());
     error
 }
 pub fn terminate(error: Fault) -> Value {
@@ -116,12 +137,15 @@ pub fn clean_headers(headers: &Value) -> Value {
     }
     clean
 }
-fn check_route(data: &Value, expected: Format) -> Result<()> {
-    if data["Metadata"]["request_path"].as_str() != Some(expected.endpoint()) {
+fn check_route(data: &Value, expected: Format, path: &str) -> Result<()> {
+    if data["Metadata"]["request_path"].as_str() != Some(path) {
         return Err(expected.mismatch(
             data["SourceFormat"].as_str().unwrap_or("未知"),
             "请求路径或操作不匹配",
         ));
+    }
+    if path == COUNT_PATH && data["Stream"].as_bool() == Some(true) {
+        return Err(Fault::input("token 计数不支持流式请求"));
     }
     // Proxies can send Connection: upgrade on ordinary HTTP requests.
     // Require an explicit protocol offer before rejecting the request.
@@ -138,8 +162,21 @@ fn check_route(data: &Value, expected: Format) -> Result<()> {
     Ok(())
 }
 pub fn validate(rt: &Runtime, data: &Value, expected: Format) -> Result<Value> {
+    validate_path(rt, data, expected, expected.endpoint())
+}
+pub fn validate_count(rt: &Runtime, data: &Value, expected: Format) -> Result<Value> {
+    if expected != Format::Claude {
+        return Err(Fault::new(
+            400,
+            "unsupported_operation",
+            "仅支持 Messages 原生 token 计数",
+        ));
+    }
+    validate_path(rt, data, expected, COUNT_PATH)
+}
+fn validate_path(rt: &Runtime, data: &Value, expected: Format, path: &str) -> Result<Value> {
     expected.check_formats(data)?;
-    check_route(data, expected)?;
+    check_route(data, expected, path)?;
     if data["AuthProvider"].as_str() != Some(PROVIDER)
         || data["AuthID"].as_str().is_none_or(str::is_empty)
     {
@@ -159,7 +196,7 @@ pub fn validate(rt: &Runtime, data: &Value, expected: Format) -> Result<Value> {
     rt.approvals
         .lock()
         .map_err(|_| Fault::new(503, "protocol_guard_failed", "原生协议校验状态不可用"))?
-        .consume(values[0], data, expected)?;
+        .consume(values[0], data, expected, path)?;
     Ok(clean_headers(&data["Headers"]))
 }
 fn known_factory_auth(rt: &Runtime, auth_id: &str) -> bool {
@@ -241,7 +278,14 @@ pub fn after(rt: &Arc<Runtime>, data: &Value) -> Value {
         if source != expected.cpa() || data["ToFormat"].as_str() != Some(expected.cpa()) {
             return Err(expected.mismatch(source, "调用协议与模型协议不匹配"));
         }
-        check_route(data, expected)?;
+        let path = if expected == Format::Claude
+            && data["Metadata"]["request_path"].as_str() == Some(COUNT_PATH)
+        {
+            COUNT_PATH
+        } else {
+            expected.endpoint()
+        };
+        check_route(data, expected, path)?;
         {
             let store = rt.lock()?;
             let account = store.account_for_auth(auth_id).ok_or_else(|| {
@@ -261,7 +305,7 @@ pub fn after(rt: &Arc<Runtime>, data: &Value) -> Value {
                 auth_id,
                 model_id,
                 source,
-                expected.endpoint(),
+                path,
                 data["Stream"].as_bool().unwrap_or(false),
             )?;
         let mut headers = json!({});
@@ -277,5 +321,36 @@ pub fn after(rt: &Arc<Runtime>, data: &Value) -> Value {
             "Factory 原生协议校验失败，已停止请求",
         )),
         _ => json!({}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_and_generation_approvals_cannot_be_replayed_across_paths() {
+        let mut approvals = Approvals::default();
+        for (issued, attempted) in [(COUNT_PATH, "/v1/messages"), ("/v1/messages", COUNT_PATH)] {
+            let nonce = approvals
+                .issue("account", "model", "claude", issued, false)
+                .unwrap();
+            let data = json!({"AuthID":"account","Model":"model","SourceFormat":"claude",
+                "Stream":false,"Metadata":{"request_path":attempted}});
+            assert!(approvals
+                .consume(&nonce, &data, Format::Claude, attempted)
+                .is_err());
+        }
+        let nonce = approvals
+            .issue("account", "model", "claude", COUNT_PATH, false)
+            .unwrap();
+        let data = json!({"AuthID":"account","Model":"model","SourceFormat":"claude",
+            "Stream":false,"Metadata":{"request_path":COUNT_PATH}});
+        assert!(approvals
+            .consume(&nonce, &data, Format::Claude, COUNT_PATH)
+            .is_ok());
+        assert!(approvals
+            .consume(&nonce, &data, Format::Claude, COUNT_PATH)
+            .is_err());
     }
 }
