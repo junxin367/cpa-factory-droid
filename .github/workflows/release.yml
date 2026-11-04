@@ -101,6 +101,9 @@ jobs:
         run: |
           node --check web/app.js
           node --check web/manager-extension.js
+          node --check web/manager-usage.js
+          node --check web/manager-worker.js
+          node --check web/manager-bootstrap.js
       - name: 构建与打包
         shell: pwsh
         run: ./scripts/build.ps1 -Target '${{ matrix.target }}' -ReleaseAssets

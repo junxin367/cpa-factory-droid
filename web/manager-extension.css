@@ -18,5 +18,21 @@
 .fd-quota-detail .fd-quota-window { padding: 16px; gap: 10px; border: 1px solid var(--accounts-border, var(--border-color, #dce1e7)); border-radius: 12px; background: var(--accounts-surface, var(--bg-primary)); }
 .fd-quota-detail .fd-quota-label { font-size: 13px; }
 .fd-quota-detail .fd-quota-header strong { font-size: 15px; }
+.fd-usage-inline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-height: 16px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.fd-usage-actual { color: var(--primary-color, #3883ff); }
+.fd-usage-prediction { color: #9670ed; }
+.fd-usage-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.fd-usage-column { min-width: 0; min-height: 162px; padding: 12px; border: 1px solid var(--accounts-border, var(--border-color, #dce1e7)); border-radius: 8px; display: flex; flex-direction: column; gap: 9px; }
+.fd-usage-forecast { background: color-mix(in srgb, var(--primary-color, #3883ff) 5%, transparent); }
+.fd-usage-title { color: var(--text-primary); font-size: 12px; }
+.fd-usage-range { color: var(--accounts-muted, var(--text-secondary)); font-size: 10px; min-height: 24px; line-height: 1.4; }
+.fd-usage-metric { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--text-secondary); font-size: 11px; }
+.fd-usage-metric strong { color: var(--text-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.fd-usage-empty { margin-block: auto; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.fd-usage-evidence { padding-top: 2px; font-size: 10px; }
+@media (max-width: 520px) {
+  .fd-usage-columns { grid-template-columns: 1fr; }
+  .fd-usage-column { min-height: 120px; }
+}
 @keyframes fd-quota-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { [data-factory-quota="refresh"][aria-busy="true"] svg { animation: none; } }

@@ -11,6 +11,9 @@ h1 { font-size:22px; margin:0 0 5px; }
 h2 { font-size:19px; margin:0; }
 .muted { color:var(--muted); font-size:13px; line-height:1.6; }
 .connection-bar { padding:15px 0; border-bottom:1px solid var(--border); margin-bottom:25px; }
+#auto-enhancement { flex-wrap:wrap; gap:8px 16px; }
+#auto-enhancement label { display:inline-flex; align-items:center; gap:8px; margin:0; cursor:pointer; }
+#auto-enhancement-toggle { width:16px; height:16px; padding:0; accent-color:var(--accent); }
 #connection-status { color:var(--muted); }
 #connection-status.connected { color:#15996c; }
 a { color:var(--accent); text-decoration:none; }

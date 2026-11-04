@@ -830,6 +830,19 @@ pub fn save_account(rt: &Runtime, cred: &Value, name: &str) -> Result<Value> {
     rt.host
         .call("host.auth.save", &json!({"name":name,"json":cred}))
 }
+fn quota_timestamp(value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    value
+        .as_str()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|date| date.with_timezone(&chrono::Utc))
+        .or_else(|| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.parse::<i64>().ok())
+                .and_then(chrono::DateTime::from_timestamp_millis)
+        })
+        .filter(|date| date.timestamp_millis() > 0)
+}
 pub fn normalize_limits(value: &Value) -> Option<Value> {
     let mut windows = Vec::new();
     for (group, prefix) in [("standard", "标准"), ("core", "Droid Core")] {
@@ -843,23 +856,8 @@ pub fn normalize_limits(value: &Value) -> Option<Value> {
                 .as_f64()
                 .filter(|v| v.is_finite() && *v >= 0.0)
             {
-                let reset = w["windowEnd"]
-                    .as_str()
-                    .and_then(|s| {
-                        chrono::DateTime::parse_from_rfc3339(s)
-                            .ok()
-                            .map(|d| d.with_timezone(&chrono::Utc))
-                            .or_else(|| {
-                                s.parse::<i64>()
-                                    .ok()
-                                    .and_then(chrono::DateTime::from_timestamp_millis)
-                            })
-                    })
-                    .or_else(|| {
-                        w["windowEnd"]
-                            .as_i64()
-                            .and_then(chrono::DateTime::from_timestamp_millis)
-                    })
+                let explicit_end = quota_timestamp(&w["windowEnd"]);
+                let reset = explicit_end
                     .or_else(|| {
                         w["secondsRemaining"]
                             .as_i64()
@@ -873,7 +871,8 @@ pub fn normalize_limits(value: &Value) -> Option<Value> {
                 windows.push(
                     json!({"name":format!("{prefix} {label}"),"group":group,"used_percent":percent,
                     "remaining_fraction":(1.0-percent/100.0).clamp(0.0,1.0),"reset_at":reset,"window_end":reset,
-                    "window_start":w["windowStart"].as_str().and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d|d.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Secs,true)),
+                    "window_start":quota_timestamp(&w["windowStart"]).map(|d|d.to_rfc3339_opts(chrono::SecondsFormat::Secs,true)),
+                    "reset_source":if explicit_end.is_some(){"window_end"}else{"seconds_remaining"},
                     "window_key":name,"duration_seconds":match name{"fiveHour"=>18000,"weekly"=>604800,_=>2592000},
                     "duration_source":"factory_window_key"}),
                 );
@@ -893,10 +892,8 @@ pub fn normalize_limits(value: &Value) -> Option<Value> {
         "checked_at":now(),"message":"Factory 官方滚动窗口；额外用量余额仅来自官方字段"}),
     )
 }
-pub fn quota(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
-    let cred = credential(data, "storage_json")?;
-    let callback = data["host_callback_id"].as_str().unwrap_or("");
-    let (code, response) = get(rt, &cred, "/api/billing/limits", callback, 15, None)?;
+fn fetch_limits(rt: &Arc<Runtime>, cred: &Value, callback: &str) -> Result<Value> {
+    let (code, response) = get(rt, cred, "/api/billing/limits", callback, 15, None)?;
     if code != 200 {
         return Err(Fault::new(
             code,
@@ -904,8 +901,70 @@ pub fn quota(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
             "Factory 额度查询失败",
         ));
     }
-    let limits = normalize_limits(&response)
-        .ok_or_else(|| Fault::new(502, "invalid_quota", "Factory 未返回可识别的额度数据"))?;
+    normalize_limits(&response)
+        .ok_or_else(|| Fault::new(502, "invalid_quota", "Factory 未返回可识别的额度数据"))
+}
+
+// The native CPA quota schema discards window boundaries. This management-only
+// resource exposes sanitized metadata; usage and prices remain owned by Manager.
+pub fn manager_quota(rt: &Arc<Runtime>, data: &Value, callback: &str) -> Result<Value> {
+    let index = data["auth_index"].as_str().unwrap_or("").trim();
+    let name = data["name"].as_str().unwrap_or("").trim();
+    if index.is_empty() || !valid_auth_filename(name) {
+        return Err(Fault::input("缺少有效的凭证名称或 auth_index"));
+    }
+    if !host_accounts(rt)?.iter().any(|file| {
+        file["auth_index"].as_str() == Some(index) && file["name"].as_str() == Some(name)
+    }) {
+        return Err(Fault::new(
+            404,
+            "credential_not_found",
+            "Factory 凭证已变更，请刷新凭证列表",
+        ));
+    }
+    let stored = rt
+        .host
+        .call("host.auth.get", &json!({"auth_index":index}))?;
+    let cred = &stored["json"];
+    if cred["type"].as_str() != Some(PROVIDER) || cred["deleted"].as_bool() == Some(true) {
+        return Err(Fault::new(409, "credential_mismatch", "凭证不属于 Factory"));
+    }
+    let limits = fetch_limits(rt, cred, callback)?;
+    let rows = limits["windows"].as_array().cloned().unwrap_or_default();
+    let core: Vec<_> = rows.iter().filter(|row| row["group"] == "core").collect();
+    // Standard is used first, even by Core models. Model names alone cannot
+    // classify past spending; mixed/unknown pools must not generate a capacity.
+    let forecast_reason = if core
+        .iter()
+        .any(|row| row["used_percent"].as_f64().is_some_and(|v| v > 0.0))
+    {
+        "mixed_core_usage"
+    } else if rows.iter().any(|row| {
+        row["group"] == "standard" && row["used_percent"].as_f64().is_some_and(|v| v >= 100.0)
+    }) {
+        "standard_exhausted"
+    } else if core.len() != 3 {
+        "pool_scope_unknown"
+    } else {
+        ""
+    };
+    Ok(json!({
+        "auth_index":index,"name":name,"provider":PROVIDER,
+        "observed_at_ms":chrono::Utc::now().timestamp_millis(),
+        "windows":rows.into_iter().filter(|row|row["group"]=="standard").collect::<Vec<_>>(),
+        "model_scope":{"kind":"all","complete":true},
+        "usage_scope":"credential",
+        // ExtraUsageAllowed is only a switch, not evidence that credits were spent.
+        // The client labels the projection as a CPA sample estimate, never a bill.
+        "forecast_eligible":forecast_reason.is_empty(),
+        "forecast_reason":forecast_reason
+    }))
+}
+
+pub fn quota(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
+    let cred = credential(data, "storage_json")?;
+    let callback = data["host_callback_id"].as_str().unwrap_or("");
+    let limits = fetch_limits(rt, &cred, callback)?;
     let mut summary = Vec::new();
     if let Some(balance) = limits["extra_usage_balance_usd"].as_f64() {
         summary.push(json!({"key":"extra_usage_balance","label":"官方额外用量余额","value":balance,"format":"currency","currency":"USD"}));

@@ -1,4 +1,4 @@
-"use strict";
+import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./manager-usage.js";
 (() => {
   // Run in the parent's realm: the plugin iframe is destroyed on route changes.
   if (window.parent !== window || window.__factoryDroidQuotaEnhancement) return;
@@ -111,7 +111,8 @@
         const name = String(file.physicalName || file.name || "").trim();
         if (provider !== "factory-droid" || !index || !name) continue;
         const key = name + "\0" + index;
-        next.set(key, { key, index });
+        const account = [file.account, file.email, file.display_account, file.displayAccount].find((value) => typeof value === "string" && value.trim()) || "";
+        next.set(key, { key, index, name, account: account.trim(), label: String(file.label || file.note || "").trim() });
       }
       accounts.clear();
       for (const [key, account] of next) accounts.set(key, account);
@@ -120,27 +121,6 @@
     })();
     accountsRequest = task;
     try { await task; } finally { if (accountsRequest === task) accountsRequest = null; }
-  }
-  function normalizeQuota(data) {
-    const quota = data?.quota || data?.data || data;
-    if (!Array.isArray(quota?.groups)) throw new Error("Factory 未返回可识别的额度");
-    const windows = [];
-    for (const group of quota.groups) {
-      // Only official Standard quotas. Never infer a balance from local usage.
-      if (!/标准|standard/i.test(group.displayName || "") || /core/i.test(group.displayName || "")) continue;
-      for (const bucket of group.buckets || []) {
-        const rawName = String(bucket.window || "");
-        const name = { "标准 5 小时": "5h", "标准 7 天": "7d", "标准 30 天": "30d" }[rawName] || rawName;
-        const label = { "5h": "5 小时", "7d": "7 天", "30d": "标准月额度" }[name];
-        if (!label || windows.some((item) => item.name === name)) continue;
-        const fraction = bucket.remainingFraction;
-        const percent = typeof fraction === "number" && Number.isFinite(fraction)
-          ? Math.max(0, Math.min(100, fraction * 100)) : null;
-        const reset = Date.parse(bucket.resetTime);
-        windows.push({ name, label, percent, reset: Number.isFinite(reset) ? reset : null });
-      }
-    }
-    return windows.sort((a, b) => ["5h", "7d", "30d"].indexOf(a.name) - ["5h", "7d", "30d"].indexOf(b.name));
   }
   function pump() {
     while (running < 2 && queue.length) {
@@ -158,17 +138,32 @@
     if (!force && previous && (previous.error || Date.now() - previous.at < MAX_AGE)) return Promise.resolve();
     const account = accounts.get(key);
     const currentEpoch = epoch;
-    cache.set(key, { ...previous, loading: true, error: "", at: previous?.at || 0 });
+    cache.set(key, { ...previous, loading: true, error: "", usageError: "", at: previous?.at || 0 });
     const task = new Promise((resolve) => queue.push({
       epoch: currentEpoch, resolve,
       run: async () => {
         try {
-          const data = await request("/plugins/factory-droid/quota", { auth_index: account.index });
+          const data = await request("/plugins/factory-droid/accounts/quota-windows", { auth_index: account.index, name: account.name });
           if (currentEpoch !== epoch || !authorized() || !accounts.has(key)) return;
-          cache.set(key, { windows: normalizeQuota(data), at: Date.now(), loading: false, error: "" });
+          let windows = normalizeQuota(data, account);
+          const targets = buildTargets(account, windows, previous?.windows);
+          const current = { windows, at: Date.now(), loading: false, usageLoading: targets.length > 0, error: "", usageError: "" };
+          cache.set(key, current); schedule();
+          if (targets.length) {
+            try {
+              const result = await request("/monitoring/account-window-usage", { windows: targets });
+              if (currentEpoch !== epoch || !authorized() || !accounts.has(key)) return;
+              windows = mergeUsage(windows, targets, result);
+              cache.set(key, { ...current, windows, usageLoading: false });
+            } catch {
+              if (currentEpoch !== epoch || !authorized() || !accounts.has(key)) return;
+              // A newly reset quota must never display the previous cycle's usage.
+              cache.set(key, { ...current, usageLoading: false, usageError: "窗口统计读取失败，请重试" });
+            }
+          }
         } catch (failure) {
           if (currentEpoch === epoch && authorized() && accounts.has(key))
-            cache.set(key, { ...previous, loading: false, at: previous?.at || 0, error: failure.message });
+            cache.set(key, { ...previous, loading: false, usageLoading: false, at: previous?.at || 0, error: failure.message });
         } finally { schedule(); }
       }
     }));
@@ -207,19 +202,58 @@
       container.prepend(button);
     }
     button.factoryAccountKey = key;
-    const loading = Boolean(cache.get(key)?.loading);
+    const loading = Boolean(cache.get(key)?.loading || cache.get(key)?.usageLoading);
     if (button.disabled !== loading) button.disabled = loading;
     if (button.getAttribute("aria-busy") !== String(loading)) button.setAttribute("aria-busy", String(loading));
   }
+  const compactNumber = (number) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(number);
+  const money = (number) => "$" + new Intl.NumberFormat("en-US", { notation: number >= 1000 ? "compact" : "standard", maximumFractionDigits: 2, minimumFractionDigits: number >= 1000 ? 0 : 2 }).format(number);
+  const dateLabel = (ms) => ms ? new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+  function emptyUsage(window, value, usage) {
+    if (!window.start) return "窗口边界未返回";
+    if (value.usageLoading) return "正在同步…";
+    if (value.usageError) return "统计读取失败";
+    if (usage?.scope_match_status && usage.scope_match_status !== "complete") return "统计范围不完整";
+    return "窗口统计暂未采集";
+  }
+  function forecastEmpty(window, value) {
+    if (value.error || value.usageError || Date.now() - window.observedAt > 120000 || window.end && Date.now() >= window.end) return "请刷新后查看预测";
+    if (!window.start) return "窗口边界未返回，暂不预测";
+    if (window.forecastReason === "mixed_core_usage") return "存在 Core 用量，暂不预测";
+    if (window.forecastReason === "standard_exhausted") return "标准额度已耗尽，暂不预测";
+    if (!window.forecastEligible) return "额度池范围未确认，暂不预测";
+    return "暂无可用预测依据";
+  }
+  function usageColumn(title, subtitle, usage, prediction, message, kind) {
+    const column = element("section", "fd-usage-column fd-usage-" + kind);
+    column.append(element("strong", "fd-usage-title", title), element("div", "fd-usage-range", subtitle));
+    if (!usage && !prediction) column.append(element("div", "fd-usage-empty", message));
+    else {
+      const metrics = prediction
+        ? [["预计请求", compactNumber(prediction.requests)], ["预计 Token", compactNumber(prediction.tokens)], ["预计花费", money(prediction.cost)]]
+        : [["请求数", compactNumber(usage.total_requests)], ["Token 数", compactNumber(usage.total_tokens)], ["预估花费", money(usage.total_cost)], ["成功率", usage.success_rate === null ? "—" : (usage.success_rate * 100).toFixed(1) + "%"]];
+      for (const [label, text] of metrics) {
+        const row = element("div", "fd-usage-metric");
+        row.append(element("span", "", label), element("strong", "", text)); column.append(row);
+      }
+      column.title = prediction
+        ? `基于本 CPA 记录与额度消耗比例估算，非官方总容量；${prediction.tokens.toLocaleString("zh-CN")} Token`
+        : `该 Factory 凭证在此区间的 CPA 请求；费用采用 Manager 统一价格；${usage.total_tokens.toLocaleString("zh-CN")} Token`;
+    }
+    return column;
+  }
   function renderQuota(root, key) {
     const value = cache.get(key) || {};
-    const signature = JSON.stringify([value.at, value.loading, value.error, value.windows]);
+    const detail = root.classList.contains("fd-quota-detail");
+    const signature = JSON.stringify([value.at, value.loading, value.usageLoading, value.error, value.usageError, value.windows, value.windows?.map((item) => Date.now() >= item.end || Date.now() - item.observedAt > 120000)]);
     if (root.factorySignature === signature) return;
     root.factorySignature = signature;
     const content = document.createDocumentFragment();
     for (const item of value.windows || []) {
       const row = element("div", "fd-quota-window");
       row.dataset.window = item.name;
+      const used = actual(item.current);
+      const predicted = forecast(item, { stale: Boolean(value.error || value.loading), usageError: value.usageError });
       const header = element("div", "fd-quota-header");
       header.append(element("span", "fd-quota-label", item.label), element("strong", "", item.percent === null ? "—" : `剩余 ${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(item.percent)}%`));
       const track = element("div", "fd-quota-track");
@@ -233,14 +267,42 @@
       bar.dataset.tone = item.percent === null ? "neutral" : item.percent <= 0 ? "bad" : item.percent < 20 ? "warn" : "good";
       track.append(bar); row.append(header, track);
       if (item.reset) {
-        const time = new Date(item.reset).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-        row.append(element("div", "fd-quota-meta", (item.reset <= Date.now() ? "窗口已到期 · " : "重置于 ") + time));
+        row.append(element("div", "fd-quota-meta", (item.reset <= Date.now() ? "窗口已到期 · " : "重置于 ") + dateLabel(item.reset)));
+      }
+      if (detail) {
+        const columns = element("div", "fd-usage-columns");
+        columns.append(
+          usageColumn(item.previousLabel, item.previousRange ? `${dateLabel(item.previousRange.from)} — ${dateLabel(item.previousRange.to)}` : "—", actual(item.previous), null, emptyUsage(item, value, item.previous), "previous"),
+          usageColumn("当前窗口已用", item.start ? `${dateLabel(item.start)} — ${dateLabel(item.end)}` : "—", used, null, emptyUsage(item, value, item.current), "current"),
+          usageColumn("当前窗口预测", "按额度消耗比例估算", null, predicted, forecastEmpty(item, value), "forecast")
+        );
+        row.append(columns);
+        const evidence = element("div", "fd-quota-meta fd-usage-evidence", `额度观测 ${dateLabel(item.observedAt)} · ${item.accuracy === "exact" ? "官方窗口时间" : item.accuracy === "derived" ? "由重置时间推导窗口" : "窗口边界未知"}`);
+        evidence.title = "窗口内请求和费用来自 CPA Manager；Core 用量混合、标准额度耗尽或范围不明确时不做容量预测。";
+        row.append(evidence);
+      } else {
+        const line = element("div", "fd-usage-inline");
+        if (used) {
+          const actualLabel = element("span", "fd-usage-actual", `已用 ${money(used.total_cost)} / ${compactNumber(used.total_tokens)}`);
+          actualLabel.title = `当前窗口 CPA 用量：${used.total_tokens.toLocaleString("zh-CN")} Token；费用采用 Manager 统一价格。`;
+          line.append(actualLabel);
+        } else line.append(element("span", "fd-quota-meta", emptyUsage(item, value, item.current)));
+        if (predicted) {
+          const predictedLabel = element("span", "fd-usage-prediction", `预测 ${money(predicted.cost)} / ${compactNumber(predicted.tokens)}`);
+          predictedLabel.title = "按本 CPA 已用量 ÷ 额度消耗比例估算窗口总容量，非官方余额。";
+          line.append(predictedLabel);
+        }
+        row.append(line);
       }
       content.append(row);
     }
     if (!value.windows?.length) content.append(element("div", "fd-quota-meta", value.loading ? "正在刷新额度…" : value.error ? "" : "暂无标准额度数据"));
     if (value.error) {
       const message = element("div", "fd-quota-error", value.error + (value.windows?.length ? " · 显示上次结果" : ""));
+      message.setAttribute("role", "status"); content.append(message);
+    }
+    if (value.usageError) {
+      const message = element("div", "fd-quota-error", value.usageError);
       message.setAttribute("role", "status"); content.append(message);
     }
     root.replaceChildren(content);
@@ -291,6 +353,14 @@
       if (empty && !empty.hasAttribute("data-factory-quota-hidden")) empty.setAttribute("data-factory-quota-hidden", "");
       mountQuota(section, key, true); void refresh(key);
     }
+    const historyButton = drawer.querySelector('[class*="quotaTabActions"] button');
+    if (historyButton) {
+      historyButton.factoryAccountKey = key;
+      if (!historyButton.factoryQuotaListener) {
+        historyButton.factoryQuotaListener = () => { void refresh(historyButton.factoryAccountKey, true); };
+        historyButton.addEventListener("click", historyButton.factoryQuotaListener);
+      }
+    }
   }
   function schedule() {
     if (timer) return;
@@ -313,7 +383,7 @@
   setInterval(() => { if (authorized() && !document.hidden) schedule(); }, 15000);
   const stylesheet = document.createElement("link");
   stylesheet.rel = "stylesheet";
-  stylesheet.href = new URL("manager-extension.css", document.currentScript.src).href;
+  stylesheet.href = new URL("manager-extension.css", import.meta.url).href;
   document.head.append(stylesheet);
   window.__factoryDroidQuotaEnhancement = Object.freeze({ connect, disconnect });
 })();

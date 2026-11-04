@@ -198,12 +198,14 @@ pub fn registration(data: &Value) -> Value {
     let routes:Vec<_>=[
         ("GET","status"),("GET","accounts"),("POST","accounts"),
         ("POST","accounts/refresh"),
+        ("POST","accounts/quota-windows"),
         ("POST","models/reconcile"),
     ].into_iter().map(|(method,path)|json!({"Method":method,"Path":format!("{base}/plugins/{PROVIDER}/{path}")})).collect();
     json!({"routes":routes,"resources":[
         {"Path":"/index.html","Menu":"Factory Droid","Description":"添加 Factory 凭据并自动同步模型"},
         {"Path":"/app.js"},{"Path":"/style.css"},
-        {"Path":"/manager-extension.js"},{"Path":"/manager-extension.css"}
+        {"Path":"/manager-extension.js"},{"Path":"/manager-extension.css"},{"Path":"/manager-usage.js"},
+        {"Path":"/manager-worker.js"},{"Path":"/manager-bootstrap.js"}
     ]})
 }
 fn response(status: u16, content_type: &str, body: impl AsRef<[u8]>) -> Value {
@@ -242,6 +244,25 @@ pub fn handle(rt: &Arc<Runtime>, req: &Value) -> Value {
                 "text/css; charset=utf-8",
                 include_bytes!("../web/manager-extension.css"),
             ),
+            "/manager-usage.js" => response(
+                200,
+                "text/javascript; charset=utf-8",
+                include_bytes!("../web/manager-usage.js"),
+            ),
+            "/manager-bootstrap.js" => response(
+                200,
+                "text/javascript; charset=utf-8",
+                include_bytes!("../web/manager-bootstrap.js"),
+            ),
+            "/manager-worker.js" => {
+                let mut result = response(
+                    200,
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../web/manager-worker.js"),
+                );
+                result["Headers"]["Service-Worker-Allowed"] = json!(["/management.html"]);
+                result
+            }
             _ => response(404, "text/plain; charset=utf-8", "资源不存在"),
         };
     }
@@ -618,6 +639,7 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
             "/accounts/models/verify",
             "/drafts/discovery",
             "/drafts/models/test",
+            "/accounts/quota-windows",
         ]
         .contains(&path)
     {
@@ -665,6 +687,7 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
                 json!({"accounts":store.accounts.values().filter(|a|!a.deleted).map(|a|a.view(&store)).collect::<Vec<_>>()}),
             )
         }
+        ("POST", "/accounts/quota-windows") => factory::manager_quota(rt, &data, callback),
         ("POST", "/accounts") => {
             let key = required(&data, "api_key")?.trim();
             factory::validate_key(key)?;

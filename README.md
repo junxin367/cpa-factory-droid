@@ -175,15 +175,19 @@ Content-Type: application/json
 
 旧插件账本和价格字段保留用于兼容读取，不自动删除或转换成 CPA 历史。卸载前可在 CPA 原生凭证页移除账号。一个插件数据目录只供一个 CPA 进程使用。
 
-版本变化见 [v0.1.3 发布说明](docs/releases/v0.1.3.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
+版本变化见 [v0.1.4 发布说明](docs/releases/v0.1.4.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
 
 ### CPA Manager Plus 原生额度
 
 在 CPA Manager Plus 中打开一次侧边栏的 **Factory Droid**，连接成功后显示“原生额度已启用”。返回凭证管理，Factory 凭证的卡片、列表和详情抽屉会出现刷新额度按钮，并展示官方 5 小时、7 天和标准月额度；未返回的窗口不虚构数值。凭证总体请求数、Token 和费用仍由 CPA / Manager 自身统计。
 
-增强脚本和样式随插件动态库一起发布，无需安装 JS Handler 或替换 `management.html`。它只适用于插件 iframe 和 Manager 父页面同源且允许访问父页面的部署，当前适配 CPA Manager Plus v1.14.10。整页刷新、退出登录或切换管理连接后，需重新进入 Factory 页激活；普通侧边栏切页无需重复激活。未保存管理密码时，可在 Factory 页手工连接。
+增强脚本和样式随插件动态库一起发布，无需安装 JS Handler 或替换 `management.html`。它只适用于插件 iframe 和 Manager 父页面同源且允许访问父页面的部署，当前适配 CPA Manager Plus v1.14.10。
 
-额度仅在当前页面内存中缓存，按凭证名称和 `auth_index` 区分，退出或更换连接即清除。只对当前显示的 Factory 凭证按需查询，最多两个并发请求；失败后由用户点击重试，保留上次结果并显示错误。增强不接管 Manager 内置账号额度、窗口用量统计或预测，也不修改管理端文件。
+在 Factory 页勾选 **自动加载额度增强**，每个浏览器只需启用一次；后续刷新 Manager 会自动加载，登录成功后恢复额度功能，无需每次打开插件。需要 HTTPS 或本机地址，作用域仅为 `/management.html`，不缓存管理页面或保存额外密钥，也不修改 API 请求。关闭同一开关即可取消，插件被移除时自动回退原管理页面。已有其他 Service Worker 接管管理页时不会覆盖它。未启用自动加载时仍使用原来的手动激活方式。
+
+v0.1.4 起，卡片同时显示当前窗口已用费用 / Token 和可用的容量预测；详情抽屉提供前期、当前窗口已用、当前窗口预测三列。费用和请求数据直接读取 Manager 窗口统计接口，复用已有统一价格。窗口边界不完整、无请求样本或存在混合 Core 用量时，不生成虚构数值；未实际观测到上一周期时，比较区间标为“前一等长区间”。具体口径见 [窗口适配规则](docs/integrations/cpa-manager-plus/README.md)。
+
+额度仅在当前页面内存中缓存，按凭证名称和 `auth_index` 区分，退出或更换连接即清除。只对当前显示的 Factory 凭证按需查询，最多两个并发请求；失败后由用户点击重试，保留上次额度并显示错误，不沿用旧预测。增强不修改管理端文件，也不伪装凭证类型。
 
 ## 开发与构建
 
@@ -195,6 +199,9 @@ Content-Type: application/json
 cargo fmt --check
 node --check web/app.js
 node --check web/manager-extension.js
+node --check web/manager-usage.js
+node --check web/manager-worker.js
+node --check web/manager-bootstrap.js
 node --check scripts/release.mjs
 node scripts/release.mjs registry
 cargo test --locked

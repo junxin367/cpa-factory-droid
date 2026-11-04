@@ -154,7 +154,10 @@
     $("manage-credentials").href = href;
     $("success-link").href = href;
     $("oauth-login").href = "/management.html#/oauth" + (plus ? "#oauth-provider-factory-droid" : "");
-    if (plus) initializeManagerEnhancement();
+    if (plus) {
+      initializeManagerEnhancement();
+      initializeAutomaticEnhancement();
+    }
     for (const id of ["manage-credentials", "success-link", "oauth-login"]) {
       $(id).onclick = (event) => {
         try {
@@ -172,6 +175,56 @@
       $("native-quota-status").hidden = !active;
     } catch { /* 父页面不允许增强时保留凭证接入功能。 */ }
   }
+  async function initializeAutomaticEnhancement() {
+    const control = $("auto-enhancement-toggle");
+    const label = $("auto-enhancement-status");
+    const workerURL = "/v0/resource/plugins/factory-droid/manager-worker.js";
+    const managerURL = "/management.html";
+    const owned = (registration) => {
+      const worker = registration?.active || registration?.waiting || registration?.installing;
+      return worker && new URL(worker.scriptURL).pathname === workerURL;
+    };
+    try {
+      if (window.parent === window || window.parent.location.origin !== location.origin) return;
+      $("auto-enhancement").hidden = false;
+      if (!isSecureContext || !("serviceWorker" in navigator)) {
+        control.disabled = true; label.textContent = "需要 HTTPS 或本机地址"; return;
+      }
+      const registration = await navigator.serviceWorker.getRegistration(managerURL);
+      control.checked = Boolean(owned(registration));
+      label.textContent = control.checked ? "此浏览器已启用" : "启用一次，后续刷新自动加载";
+      control.onchange = async () => {
+        const enable = control.checked;
+        control.disabled = true;
+        try {
+          const current = await navigator.serviceWorker.getRegistration(managerURL);
+          if (current && !owned(current)) throw new Error("管理页已有其他自动加载服务，保持现有设置");
+          if (enable) {
+            const registration = await navigator.serviceWorker.register(workerURL, { scope: managerURL, updateViaCache: "none" });
+            const worker = registration.installing || registration.waiting || registration.active;
+            if (worker?.state !== "activated") await new Promise((resolve, reject) => {
+              const finish = (failure) => { clearTimeout(timeout); worker?.removeEventListener("statechange", check); failure ? reject(failure) : resolve(); };
+              const check = () => {
+                if (worker?.state === "activated") finish();
+                else if (!worker || worker.state === "redundant") finish(new Error("自动加载未激活"));
+              };
+              const timeout = setTimeout(() => finish(new Error("自动加载未激活")), 15000);
+              worker?.addEventListener("statechange", check);
+              check();
+            });
+            label.textContent = "已启用，后续刷新自动加载";
+          } else {
+            if (current) await current.unregister();
+            window.parent.__factoryDroidAutoBootstrap?.stop();
+            label.textContent = "已关闭，下次刷新生效";
+          }
+        } catch (failure) {
+          control.checked = !enable;
+          label.textContent = failure.message.includes("已有其他") ? failure.message : "设置失败，当前浏览器或服务端不支持";
+        } finally { control.disabled = false; }
+      };
+    } catch { label.textContent = "当前浏览器不支持自动加载"; control.disabled = true; }
+  }
   function initializeManagerEnhancement() {
     try {
       if (window.parent === window || window.parent.location.origin !== location.origin || window.parent.location.pathname !== "/management.html") return;
@@ -181,6 +234,7 @@
       if (!script) {
         script = parentDocument.createElement("script");
         script.id = "factory-droid-manager-extension";
+        script.type = "module";
         script.src = "/v0/resource/plugins/factory-droid/manager-extension.js";
         script.addEventListener("error", () => script.remove(), { once: true });
         parentDocument.head.append(script);

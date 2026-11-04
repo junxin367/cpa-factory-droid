@@ -93,10 +93,14 @@ class Mock(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/billing/limits":
+            observed = int(time.time() * 1000)
+            window = lambda used, duration: {"usedPercent": used,
+                "windowStart": observed - 3600000, "windowEnd": observed - 3600000 + duration}
             return self.reply({"limits": {
-                "standard": {"fiveHour": {"usedPercent": 2}, "weekly": {"usedPercent": 14},
-                             "monthly": {"usedPercent": 25, "secondsRemaining": 86400}},
-                "core": {"fiveHour": {"usedPercent": 0}}}})
+                "standard": {"fiveHour": window(2, 18000000), "weekly": window(14, 604800000),
+                             "monthly": window(25, 2592000000)},
+                "core": {"fiveHour": {"usedPercent": 0}, "weekly": {"usedPercent": 0},
+                         "monthly": {"usedPercent": 0}}}, "extraUsageAllowed": False})
         with self.lock:
             Mock.whoami_calls += 1
         self.reply({"userId": "mock-user", "email": "mock@example.test", "orgId": "mock-org", "region": "us"})
@@ -245,7 +249,7 @@ routing:
     request-retry: 0
 """, encoding="utf-8")
 
-        def request(path, body=None, key=None, headers=None, stream=False, method=None):
+        def request(path, body=None, key=None, headers=None, stream=False, method=None, response_headers=None):
             nonlocal actual_host_version
             # urllib forces Connection: close, hiding reverse-proxy upgrade-header regressions.
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
@@ -254,6 +258,8 @@ routing:
                     body=None if body is None else json.dumps(body).encode(),
                     headers={"Authorization": "Bearer " + (key or management), "Content-Type": "application/json", **(headers or {})})
                 response = connection.getresponse()
+                if response_headers is not None:
+                    response_headers.update(dict(response.getheaders()))
                 if path == "/v0/management/plugins":
                     actual_host_version = response.headers.get("X-CPA-VERSION", "").removeprefix("v")
                 raw = response.read()
@@ -339,6 +345,38 @@ routing:
         check("原生额度接口保留标准窗口名称和比例",
               [bucket["window"] for bucket in standard["buckets"]] == ["标准 5 小时", "标准 7 天", "标准 30 天"]
               and abs(standard["buckets"][2]["remainingFraction"] - 0.75) < 0.00001)
+        metadata = request("/v0/management/plugins/factory-droid/accounts/quota-windows",
+                           {"auth_index": quota_auth["auth_index"], "name": quota_auth["name"]})
+        detail = metadata["data"]
+        check("窗口元数据绑定原生凭证且只返回标准额度",
+              metadata["ok"] and detail["auth_index"] == quota_auth["auth_index"]
+              and detail["name"] == quota_auth["name"] and len(detail["windows"]) == 3
+              and all(window["group"] == "standard" for window in detail["windows"]))
+        check("窗口元数据保留毫秒时间戳边界与官方观测时间",
+              all(window["window_start"] and window["window_end"] and window["reset_source"] == "window_end"
+                  for window in detail["windows"]) and detail["observed_at_ms"] > 0)
+        check("窗口数据不包含密钥且不重复统计费用",
+              "fk-local-integration-only" not in json.dumps(metadata)
+              and "total_cost" not in detail and detail["model_scope"] == {"kind": "all", "complete": True})
+        try:
+            request("/v0/management/plugins/factory-droid/accounts/quota-windows",
+                    {"auth_index": quota_auth["auth_index"], "name": "factory-droid-other.json"})
+        except CPARequestError as failure:
+            check("窗口查询拒绝错配凭证身份", failure.status == 404)
+        else:
+            check("窗口查询拒绝错配凭证身份", False)
+        usage_module = request("/v0/resource/plugins/factory-droid/manager-usage.js", stream=True)
+        check("窗口统计模块已内嵌并可加载", "export function buildTargets" in usage_module)
+        worker_headers = {}
+        worker = request("/v0/resource/plugins/factory-droid/manager-worker.js", stream=True,
+                         response_headers=worker_headers)
+        check("自动加载 Worker 资源与管理页作用域声明有效",
+              "Service-Worker-Allowed" in worker_headers
+              and worker_headers["Service-Worker-Allowed"] == "/management.html"
+              and 'url.pathname !== "/management.html"' in worker)
+        bootstrap = request("/v0/resource/plugins/factory-droid/manager-bootstrap.js", stream=True)
+        check("自动激活模块可访问且提供关闭入口",
+              "__factoryDroidAutoBootstrap" in bootstrap and "自动加载额度增强" in page)
         auth_file = next((profile / "auth").glob("*.json"))
         original = json.loads(auth_file.read_text(encoding="utf-8"))
         original_models = models()
