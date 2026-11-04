@@ -10,7 +10,7 @@
 | --- | --- |
 | LLM 客户端身份 | 默认 `User-Agent: factory-cli/1.2.0`、`X-Factory-Client: cli`、`X-Client-Version: 1.2.0` |
 | 认证 | 插件读取当前 Factory API Key / OAuth access token，重建 Bearer；不转发下游 CPA Key |
-| Anthropic | 保留有效原生版本和 beta 标志；移除官方样本中不存在的占位 `X-Api-Key` |
+| Anthropic | 固定 `anthropic-version: 2023-06-01` 和 `anthropic-beta: fine-grained-tool-streaming-2025-05-14`；模型目录要求 fast 模式时补充对应 beta；不转发调用者的版本、beta 或占位 `X-Api-Key` |
 | 模型路由 | 原生路径、上游模型名、`x-api-provider`、`x-provider-routing-source` 和 OpenAI 组织头与采样对齐 |
 | 会话 | `x-session-id` 使用不透明 UUID；有明确对话标识时，在相同凭据和调用方范围内稳定，重启后也保持一致 |
 | 单次消息及跟踪 | 每次出站独立生成消息 UUID 和 W3C `traceparent`，不转发本地 request ID、traceparent、tracestate 或 baggage |
@@ -18,7 +18,9 @@
 | API 查询 | whoami 使用采样中的 `Bun/1.4.4` fetch 身份；billing 查询补充 CLI 版本及独立追踪头 |
 | OAuth | 使用明确的 fetch 客户端头，不依赖 Go 默认 User-Agent；账号授权流程保持原样 |
 
-发往上游的头部从空集合构造，只接收经过格式校验的 Anthropic/OpenAI 协议头。下游 `User-Agent`、`Via`、`Forwarded`、`X-Forwarded-*`、`Origin`、`Referer`、Cookie、代理鉴权及插件内部门禁头均不转发。协议头中的已知 CPA、CLIProxyAPI、代理或路由器标识被拒绝。
+发往上游的头部从空集合构造，只使用 Factory CLI 默认值、当前 Factory 凭据、受信任模型目录及插件生成的会话/跟踪标识。下游 `User-Agent`、`Via`、`Forwarded`、`X-Forwarded-*`、`Origin`、`Referer`、Cookie、代理鉴权及插件内部门禁头均不转发。调用者的 `anthropic-version`、`anthropic-beta` 和 `OpenAI-Beta` 也不透传，不再因 Claude Code 的 `claude-code-20250219` 等标志不符合日期格式而拒绝请求。
+
+固定协议头按上述 Factory CLI 采样基线生成；`server-side-fallback` / `fallback-credit` 与本插件未启用的 fallback 请求流程配套，因此不单独照搬。客户端通过自定义 beta 头开启的其他实验功能不会自动启用；只有插件实现并与模型目录匹配的能力才会生成对应上游标志。
 
 会话优先采用原生 `conversation`，其次读取明确的 CLI/会话/线程字段和执行会话；Claude 子代理及 Codex 子线程分别隔离。CPA 的 canonical/derived ID 可能来自共享缓存键、用户或路由前缀，不能直接认作对话。缺少明确线索时，单次请求使用独立会话 UUID；派生前缀仍可用于默认缓存分组。
 

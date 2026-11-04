@@ -9,6 +9,8 @@ use crate::{guard, state::Model, Fault, Result, Runtime};
 
 pub const CLIENT_VERSION: &str = "1.2.0";
 pub const FETCH_USER_AGENT: &str = "Bun/1.4.4";
+pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub const ANTHROPIC_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 pub struct Identifiers {
     namespace: Uuid,
 }
@@ -325,111 +327,68 @@ pub fn payload(request: &Value, model: &Model, identity: &Identity) -> Result<Va
     Ok(payload)
 }
 
-fn proxy_marker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| word == "cpa")
-        || [
-            "cpa-",
-            "cpa_",
-            "cliproxy",
-            "cpamp",
-            "proxy",
-            "litellm",
-            "openrouter",
-            "forwarded",
-        ]
-        .iter()
-        .any(|marker| lower.contains(marker))
-}
-
-fn beta_token(value: &str) -> bool {
-    if value.len() > 160 || proxy_marker(value) {
-        return false;
-    }
-    let Some((prefix, date)) = value
-        .len()
-        .checked_sub(10)
-        .map(|offset| value.split_at(offset))
-    else {
-        return false;
-    };
-    !prefix.is_empty()
-        && prefix.as_bytes()[0].is_ascii_lowercase()
-        && prefix.ends_with('-')
-        && prefix
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
-}
-
-pub fn protocol_headers(headers: &mut Value, incoming: &Value, model: &Model) -> Result<()> {
-    let invalid = || {
-        Fault::new(
-            400,
-            "invalid_native_request",
-            "原生协议请求头无效或包含代理标识",
-        )
-    };
+pub fn apply_protocol_defaults(headers: &mut Value, model: &Model) {
+    // Captured Factory CLI 1.2.0 defaults, not caller-provided Claude Code headers.
+    // Fallback betas require the CLI's fallback payload flow, which we do not enable.
     if model.protocol == "anthropic" {
-        let versions = guard::header_values(incoming, "anthropic-version");
-        if versions.len() > 1
-            || versions.first().is_some_and(|value| {
-                value.len() != 10 || chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err()
-            })
-        {
-            return Err(invalid());
-        }
-        headers["anthropic-version"] = json!([versions.first().copied().unwrap_or("2023-06-01")]);
-        let mut flags = Vec::new();
-        for value in guard::header_values(incoming, "anthropic-beta") {
-            if value.len() > 4096 || !value.is_ascii() {
-                return Err(invalid());
-            }
-            for flag in value.split(',').map(str::trim) {
-                if !beta_token(flag) {
-                    return Err(invalid());
-                }
-                if !flags.contains(&flag) {
-                    flags.push(flag);
-                }
-            }
-        }
-        if !flags.is_empty() {
-            headers["anthropic-beta"] = json!([flags.join(",")]);
-        }
-    } else {
-        let values = guard::header_values(incoming, "OpenAI-Beta");
-        for value in &values {
-            if value.len() > 4096
-                || proxy_marker(value)
-                || !value.is_ascii()
-                || !value.split(',').all(|item| {
-                    item.trim().split_once('=').is_some_and(|(key, value)| {
-                        !key.is_empty()
-                            && !value.is_empty()
-                            && key
-                                .bytes()
-                                .chain(value.bytes())
-                                .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
-                    })
-                })
-            {
-                return Err(invalid());
-            }
-        }
-        if !values.is_empty() {
-            headers["OpenAI-Beta"] = json!([values.join(",")]);
-        }
+        headers["anthropic-version"] = json!([ANTHROPIC_VERSION]);
+        headers["anthropic-beta"] = json!([ANTHROPIC_BETA]);
     }
     crate::catalog::apply_required_headers(headers, model);
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_protocol_defaults_match_the_factory_cli_baseline() {
+        let model = Model {
+            protocol: "anthropic".into(),
+            upstream_provider: "anthropic".into(),
+            ..Model::default()
+        };
+        let mut outgoing = json!({});
+        apply_protocol_defaults(&mut outgoing, &model);
+        assert_eq!(outgoing["anthropic-version"], json!(["2023-06-01"]));
+        assert_eq!(
+            outgoing["anthropic-beta"],
+            json!(["fine-grained-tool-streaming-2025-05-14"])
+        );
+        assert_eq!(outgoing.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn trusted_factory_model_requirements_are_applied_after_defaults() {
+        let model = Model {
+            protocol: "anthropic".into(),
+            upstream_provider: "anthropic".into(),
+            upstream_id: "claude-opus-5-5-fast".into(),
+            ..Model::default()
+        };
+        let mut outgoing = json!({});
+        apply_protocol_defaults(&mut outgoing, &model);
+        assert_eq!(
+            outgoing["anthropic-beta"],
+            json!([
+                "fine-grained-tool-streaming-2025-05-14",
+                "fast-mode-2026-02-01"
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_protocol_defaults_do_not_invent_beta_headers() {
+        for protocol in ["responses", "chat_completions"] {
+            let model = Model {
+                protocol: protocol.into(),
+                ..Model::default()
+            };
+            let mut outgoing = json!({});
+            apply_protocol_defaults(&mut outgoing, &model);
+            assert_eq!(outgoing, json!({}));
+        }
+    }
 
     fn ids() -> Identifiers {
         Identifiers::new("afac50e3-b106-4935-a576-7cd096c35de4").unwrap()

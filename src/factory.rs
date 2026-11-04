@@ -512,7 +512,7 @@ pub fn llm_request(
         _ => "/api/llm/o/v1/chat/completions",
     };
     let mut h = headers(rt, cred);
-    wire::protocol_headers(&mut h, native_headers, model)?;
+    wire::apply_protocol_defaults(&mut h, model);
     let identity = wire::identity(rt, cred, native_headers, metadata, request)?;
     let request = wire::payload(request, model, &identity)?;
     h["Content-Type"] = json!(["application/json"]);

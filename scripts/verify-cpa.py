@@ -130,7 +130,10 @@ class Mock(BaseHTTPRequestHandler):
             "safety": data.get("safety_identifier"), "input": data.get("input"), "messages": data.get("messages"),
             "conversation": data.get("conversation"), "previous_response_id": data.get("previous_response_id"),
             "metadata": data.get("metadata"), "cache_control": data.get("cache_control"),
-            "user_agent": self.headers.get("User-Agent"), "forwarded": self.headers.get("X-Forwarded-For")}
+            "user_agent": self.headers.get("User-Agent"), "forwarded": self.headers.get("X-Forwarded-For"),
+            "wire_headers": {name: self.headers.get(name) for name in [
+                "Anthropic-Version", "Anthropic-Beta", "OpenAI-Beta", "X-Factory-Client",
+                "X-Client-Version", "X-Stainless-OS", "X-Factory-Org-Id", "Forwarded"]}}
         if self.path.endswith("/messages"):
             value = {"id": "msg_mock", "type": "message", "role": "assistant", "model": data["model"],
                 "content": [{"type": "text", "text": json.dumps(probe)}], "stop_reason": "end_turn",
@@ -412,6 +415,30 @@ routing:
         for protocol, marker in [("anthropic", "message_stop"), ("responses", "response.completed"), ("chat", "[DONE]")]:
             check(f"{protocol} 原生非流式请求", bool(call(protocol=protocol)["session"]))
             check(f"{protocol} 原生流式请求", marker in call(protocol=protocol, stream=True))
+            client_headers = {
+                "anthropic-beta": "claude-code-20250219,cpa-client-2025-01-01",
+                "anthropic-version": "caller-version",
+                "OpenAI-Beta": "cpa=caller-proxy",
+                "User-Agent": "caller-claude-code",
+                "X-Factory-Client": "caller-proxy",
+                "X-Client-Version": "caller-version",
+                "X-Stainless-OS": "caller-os",
+                "X-Factory-Org-Id": "caller-org",
+                "Forwarded": "for=caller-proxy",
+                "X-Forwarded-For": "127.0.0.99",
+            }
+            header_probe = call(protocol=protocol, headers=client_headers)
+            expected_headers = {name: None for name in header_probe["wire_headers"]}
+            expected_headers.update({"X-Factory-Client": "cli", "X-Client-Version": "1.2.0"})
+            if protocol == "anthropic":
+                expected_headers.update({"Anthropic-Version": "2023-06-01",
+                    "Anthropic-Beta": "fine-grained-tool-streaming-2025-05-14"})
+            check(f"{protocol} 使用 Factory CLI 默认头且不透传调用者头",
+                  header_probe["wire_headers"] == expected_headers
+                  and header_probe["user_agent"] == "factory-cli/1.2.0"
+                  and header_probe["forwarded"] is None)
+            check(f"{protocol} 带调用者版本和 beta 的 SSE 请求正常",
+                  marker in call(protocol=protocol, stream=True, headers=client_headers))
             for case, headers in [
                 ("孤立 Connection upgrade", {"Connection": "upgrade"}),
                 ("混合大小写连接标记", {"Connection": "keep-alive, UpGrAdE"}),
