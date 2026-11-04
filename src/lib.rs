@@ -29,6 +29,10 @@ use host::{decode, encode, Host};
 use state::{Model, Store};
 
 pub const PROVIDER: &str = "factory-droid";
+// Schema 7 supplies the body-omitting interceptor flags used below.
+// This single-provider plugin does not use schema 8 raw patches, schema 9
+// multi-provider catalogs, or schema 10 multi-auth provider declarations.
+const RPC_SCHEMA_VERSION: u32 = 7;
 pub type Result<T> = std::result::Result<T, Fault>;
 #[derive(Clone, Debug, Serialize)]
 pub struct Fault {
@@ -467,7 +471,7 @@ impl Drop for Operation {
 }
 
 fn register() -> Value {
-    json!({"schema_version":10,"metadata":{"Name":"Factory Droid","Version":env!("CARGO_PKG_VERSION"),
+    json!({"schema_version":RPC_SCHEMA_VERSION,"metadata":{"Name":"Factory Droid","Version":env!("CARGO_PKG_VERSION"),
         "Author":"junxin367","GitHubRepository":env!("CARGO_PKG_REPOSITORY"),
         "ConfigFields":[
             {"Name":"data-dir","Type":"string","Description":"脱敏状态与模型目录缓存，默认 data/factory-droid"},
@@ -482,6 +486,67 @@ fn register() -> Value {
         "usage_plugin":false,"management_api":true}})
 }
 
+fn validate_host_schema(data: &Value) -> Result<()> {
+    if let Some(schema) = data.get("schema_version") {
+        let version = schema
+            .as_u64()
+            .ok_or_else(|| Fault::input("CPA 插件协议版本必须为非负整数"))?;
+        if version < u64::from(RPC_SCHEMA_VERSION) {
+            return Err(Fault::new(
+                400,
+                "unsupported_host_schema",
+                "Factory Droid 需要支持 RPC Schema 7 或以上的 CPA 宿主",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    #[test]
+    fn advertises_only_the_contract_needed_by_single_provider_capabilities() {
+        let registration = register();
+        assert_eq!(registration["schema_version"], 7);
+        let caps = &registration["capabilities"];
+        assert_eq!(caps["request_interceptor_omit_body_before"], true);
+        assert_eq!(caps["request_interceptor_omit_body_after"], true);
+        assert_eq!(caps["auth_provider"], true);
+        assert_eq!(caps["model_provider"], true);
+        for field in [
+            "multi_auth_provider",
+            "auth_providers",
+            "auth_provider_entries",
+            "request_interceptor_patch_body_before",
+            "request_interceptor_patch_body_after",
+        ] {
+            assert!(
+                caps[field].is_null(),
+                "capability requires a newer contract: {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_supported_hosts_and_rejects_explicitly_incompatible_contracts() {
+        for version in [7, 8, 10, 11] {
+            assert!(validate_host_schema(&json!({"schema_version":version})).is_ok());
+        }
+        assert!(validate_host_schema(&json!({})).is_ok());
+        for version in [0, 1, 6] {
+            assert_eq!(
+                validate_host_schema(&json!({"schema_version":version}))
+                    .unwrap_err()
+                    .code,
+                "unsupported_host_schema"
+            );
+        }
+        assert!(validate_host_schema(&json!({"schema_version":"8"})).is_err());
+    }
+}
+
 pub fn shutdown() {
     let current = RUNTIME
         .get()
@@ -493,6 +558,7 @@ pub fn shutdown() {
 pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
     match method {
         "plugin.register" | "plugin.reconfigure" => {
+            validate_host_schema(data)?;
             let bytes = decode(&data["config_yaml"])?;
             let config: Config = if bytes.is_empty() {
                 Config::default()

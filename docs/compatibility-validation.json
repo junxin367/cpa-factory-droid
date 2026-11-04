@@ -1,0 +1,368 @@
+{
+  "version": "0.1.2",
+  "date": "2026-11-04",
+  "rpc_schema": 7,
+  "unit_tests": 16,
+  "library_profile": "release",
+  "before_v0_1_1": {
+    "at": "2026-11-04T01:40:39.911321+00:00",
+    "host": "CPA v8.0.47",
+    "actual_host_version": "8.0.47",
+    "platform": "Windows",
+    "library_sha256": "f7bdc0093622c16cd66c68b7e8fd98ea1480e760498aeafef4b79f4006c77ad3",
+    "real_upstream": false,
+    "checks": [
+      {
+        "name": "实际 CPA 宿主版本与验收目标一致",
+        "passed": true
+      },
+      {
+        "name": "插件完成注册并启用",
+        "passed": false
+      },
+      {
+        "name": "插件菜单已注册",
+        "passed": false
+      },
+      {
+        "name": "原生 OAuth 与额度能力已注册",
+        "passed": false
+      }
+    ]
+  },
+  "after": [
+    {
+      "at": "2026-11-04T01:52:00.679161+00:00",
+      "host": "CPA v8.0.47",
+      "actual_host_version": "8.0.47",
+      "platform": "Windows",
+      "library_sha256": "76b7fb06c1fd1045d38bd7546cc61d473207dc9ecbe635d811912dda8f562954",
+      "real_upstream": false,
+      "checks": [
+        {
+          "name": "实际 CPA 宿主版本与验收目标一致",
+          "passed": true
+        },
+        {
+          "name": "插件完成注册并启用",
+          "passed": true
+        },
+        {
+          "name": "插件菜单已注册",
+          "passed": true
+        },
+        {
+          "name": "原生 OAuth 与额度能力已注册",
+          "passed": true
+        },
+        {
+          "name": "插件页面资源可访问",
+          "passed": true
+        },
+        {
+          "name": "原生凭据创建并发布模型",
+          "passed": true
+        },
+        {
+          "name": "初始目录已同步",
+          "passed": true
+        },
+        {
+          "name": "共享缓存组不合并明确对话",
+          "passed": true
+        },
+        {
+          "name": "切换缓存组不改变会话身份",
+          "passed": true
+        },
+        {
+          "name": "同名子代理的不同线程独立",
+          "passed": true
+        },
+        {
+          "name": "同一子线程跨轮次稳定",
+          "passed": true
+        },
+        {
+          "name": "不同调用方隔离",
+          "passed": true
+        },
+        {
+          "name": "安全标识与对话分别映射",
+          "passed": true
+        },
+        {
+          "name": "只有缓存键不建立共享对话",
+          "passed": true
+        },
+        {
+          "name": "16 个并发会话身份与正文独立",
+          "passed": true
+        },
+        {
+          "name": "保留原生续接字段",
+          "passed": true
+        },
+        {
+          "name": "上游包装移除反代元数据",
+          "passed": true
+        },
+        {
+          "name": "anthropic 原生非流式请求",
+          "passed": true
+        },
+        {
+          "name": "anthropic 原生流式请求",
+          "passed": true
+        },
+        {
+          "name": "responses 原生非流式请求",
+          "passed": true
+        },
+        {
+          "name": "responses 原生流式请求",
+          "passed": true
+        },
+        {
+          "name": "chat 原生非流式请求",
+          "passed": true
+        },
+        {
+          "name": "chat 原生流式请求",
+          "passed": true
+        },
+        {
+          "name": "缓存断点原样保留",
+          "passed": true
+        },
+        {
+          "name": "重启后匿名会话和缓存稳定",
+          "passed": true
+        },
+        {
+          "name": "CPA 原生排除、别名和前缀生效",
+          "passed": true
+        },
+        {
+          "name": "原生规则不导致目录降级",
+          "passed": true
+        },
+        {
+          "name": "原生规则下手工同步成功",
+          "passed": true
+        },
+        {
+          "name": "原生别名可调用",
+          "passed": true
+        },
+        {
+          "name": "CPA 支持隐藏全部模型",
+          "passed": true
+        },
+        {
+          "name": "全部模型被排除仍视为正常",
+          "passed": true
+        },
+        {
+          "name": "API Key 目录到期后由 CPA 自动刷新",
+          "passed": true
+        },
+        {
+          "name": "目录刷新不改变凭证标识",
+          "passed": true
+        },
+        {
+          "name": "原生 OAuth 创建设备授权",
+          "passed": true
+        },
+        {
+          "name": "原生 OAuth 完成模拟授权",
+          "passed": true
+        },
+        {
+          "name": "OAuth 到期后轮换并持久化令牌",
+          "passed": true
+        },
+        {
+          "name": "插件状态不保存凭证或令牌",
+          "passed": true
+        },
+        {
+          "name": "最终目录和健康状态正常",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "at": "2026-11-04T01:52:00.679161+00:00",
+      "host": "CPA v8.0.52",
+      "actual_host_version": "8.0.52",
+      "platform": "Windows",
+      "library_sha256": "76b7fb06c1fd1045d38bd7546cc61d473207dc9ecbe635d811912dda8f562954",
+      "real_upstream": false,
+      "checks": [
+        {
+          "name": "实际 CPA 宿主版本与验收目标一致",
+          "passed": true
+        },
+        {
+          "name": "插件完成注册并启用",
+          "passed": true
+        },
+        {
+          "name": "插件菜单已注册",
+          "passed": true
+        },
+        {
+          "name": "原生 OAuth 与额度能力已注册",
+          "passed": true
+        },
+        {
+          "name": "插件页面资源可访问",
+          "passed": true
+        },
+        {
+          "name": "原生凭据创建并发布模型",
+          "passed": true
+        },
+        {
+          "name": "初始目录已同步",
+          "passed": true
+        },
+        {
+          "name": "共享缓存组不合并明确对话",
+          "passed": true
+        },
+        {
+          "name": "切换缓存组不改变会话身份",
+          "passed": true
+        },
+        {
+          "name": "同名子代理的不同线程独立",
+          "passed": true
+        },
+        {
+          "name": "同一子线程跨轮次稳定",
+          "passed": true
+        },
+        {
+          "name": "不同调用方隔离",
+          "passed": true
+        },
+        {
+          "name": "安全标识与对话分别映射",
+          "passed": true
+        },
+        {
+          "name": "只有缓存键不建立共享对话",
+          "passed": true
+        },
+        {
+          "name": "16 个并发会话身份与正文独立",
+          "passed": true
+        },
+        {
+          "name": "保留原生续接字段",
+          "passed": true
+        },
+        {
+          "name": "上游包装移除反代元数据",
+          "passed": true
+        },
+        {
+          "name": "anthropic 原生非流式请求",
+          "passed": true
+        },
+        {
+          "name": "anthropic 原生流式请求",
+          "passed": true
+        },
+        {
+          "name": "responses 原生非流式请求",
+          "passed": true
+        },
+        {
+          "name": "responses 原生流式请求",
+          "passed": true
+        },
+        {
+          "name": "chat 原生非流式请求",
+          "passed": true
+        },
+        {
+          "name": "chat 原生流式请求",
+          "passed": true
+        },
+        {
+          "name": "缓存断点原样保留",
+          "passed": true
+        },
+        {
+          "name": "重启后匿名会话和缓存稳定",
+          "passed": true
+        },
+        {
+          "name": "CPA 原生排除、别名和前缀生效",
+          "passed": true
+        },
+        {
+          "name": "原生规则不导致目录降级",
+          "passed": true
+        },
+        {
+          "name": "原生规则下手工同步成功",
+          "passed": true
+        },
+        {
+          "name": "原生别名可调用",
+          "passed": true
+        },
+        {
+          "name": "CPA 支持隐藏全部模型",
+          "passed": true
+        },
+        {
+          "name": "全部模型被排除仍视为正常",
+          "passed": true
+        },
+        {
+          "name": "API Key 目录到期后由 CPA 自动刷新",
+          "passed": true
+        },
+        {
+          "name": "目录刷新不改变凭证标识",
+          "passed": true
+        },
+        {
+          "name": "原生 OAuth 创建设备授权",
+          "passed": true
+        },
+        {
+          "name": "原生 OAuth 完成模拟授权",
+          "passed": true
+        },
+        {
+          "name": "OAuth 到期后轮换并持久化令牌",
+          "passed": true
+        },
+        {
+          "name": "插件状态不保存凭证或令牌",
+          "passed": true
+        },
+        {
+          "name": "最终目录和健康状态正常",
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "real_factory_oauth": false,
+  "real_factory_inference": false,
+  "release_validation": "四个平台均在 CPA v8.0.47 和 v8.0.52 上执行相同宿主门禁。",
+  "host_fixture_boundary": {
+    "host": "CPA v8.0.47",
+    "operation": "原生通用字段 PATCH 清空 model_aliases",
+    "observation": "持久化字段已清空时，运行时仍曾返回 friendly-gpt；重新启动隔离宿主后恢复 factory/gpt-5.4",
+    "scope": "未修改宿主；测试复原别名夹具后重新启动，不宣称热清空已修复"
+  }
+}

@@ -75,8 +75,10 @@ jobs:
         shell: pwsh
         run: |
           $library = if ('${{ matrix.goos }}' -eq 'windows') { 'cpa_factory_droid.dll' } else { 'libcpa_factory_droid.so' }
-          python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --report "temp/cpa-validation-${{ matrix.platform }}.json"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($cpaVersion in @('8.0.47', '8.0.52')) {
+            python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --host-version $cpaVersion --report "temp/cpa-validation-${{ matrix.platform }}-$cpaVersion.json"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: factory-droid-${{ matrix.platform }}

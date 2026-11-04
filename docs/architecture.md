@@ -29,7 +29,7 @@ API Key 接入通过 `host.auth.save` 保存凭据；OAuth 由 `auth.login.poll`
 
 动态库导出 `cliproxy_plugin_init`，交换 `HostApi` / `PluginApi`。业务通过 JSON RPC envelope 传递；Go `[]byte` 字段按 Base64 编解码。宿主 callback 的返回缓冲区由宿主释放，插件返回缓冲区由插件释放，避免跨分配器释放。C 边界捕获 panic 并返回脱敏错误。
 
-注册声明 auth、model、executor、quota、management 和请求拦截能力。原生契约使用 RPC schema 10，宿主基线为 CPA v8.0.52；CGO 关闭的 CPA 不能加载这些原生动态库。
+注册声明 auth、model、executor、quota、management 和请求拦截能力。原生契约声明实际需要的 RPC Schema 7；不使用 Schema 8 的原始字节补丁、Schema 9 的多提供商目录或 Schema 10 的多 OAuth 入口扩展。已验证 CPA v8.0.47（最高 Schema 8）和 v8.0.52（最高 Schema 10）；CGO 关闭的 CPA 不能加载这些原生动态库。
 
 请求通过 `host.http.operation_open` 建立可取消操作，复用宿主 HTTP 与代理策略。流式执行先取得上游流和响应头，再由工作线程转发原生 chunks，并独立观察原生终态。超时仅取消本次 operation 及其绑定下游，不关闭其他并发请求。quiesce / shutdown 取消活动操作和发现进程，等待收尾；仍未结束时返回 draining 状态，不假装旧请求已完成。本机验收范围见 [验证记录](validation.md)。
 

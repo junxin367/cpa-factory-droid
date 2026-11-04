@@ -23,24 +23,38 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-HOST_VERSION = "8.0.52"
 # 固定官方带原生插件能力的包；不接受 no-plugin 变体或动态 latest。
 HOST_PACKAGES = {
-    ("Windows", "amd64"): ("windows_amd64.zip", "395324dd124bd657bccd5fdf06119587cd7c87bddacff191d5f45431e8f08d23"),
-    ("Linux", "amd64"): ("linux_amd64.tar.gz", "4f8855647b3107b83e6b4a2d9418f95d8c53c57827b7f0910cf5ee9c849ff88b"),
-    ("Darwin", "amd64"): ("darwin_amd64.tar.gz", "a9f91c8ae68536b43a6e34178bcc9bd3233c4f684e4b83015ca331eebf5292bb"),
-    ("Darwin", "arm64"): ("darwin_aarch64.tar.gz", "2294797c40ca0dffb89984e88efb242378cd538f3086ab301ad733c7c0c151c9"),
+    "8.0.47": {
+        ("Windows", "amd64"): ("windows_amd64.zip", "8e23cbb2f9f695411b7df46320855820b352fb886c3c3bdf45ab4634f2f14632"),
+        ("Linux", "amd64"): ("linux_amd64.tar.gz", "2b5111dc6a0dfe0d607457787f794330d1b477bc9daa6337c26b0cd032a7827e"),
+        ("Darwin", "amd64"): ("darwin_amd64.tar.gz", "2e72cb7b28905b9135563e4fc01af00009ce72a444729eb95bdb634543ce7d41"),
+        ("Darwin", "arm64"): ("darwin_aarch64.tar.gz", "a5b260ec0f843d2291488acd76e5595232da8f3b8ec2d334154f1570f5f3ca08"),
+    },
+    "8.0.52": {
+        ("Windows", "amd64"): ("windows_amd64.zip", "395324dd124bd657bccd5fdf06119587cd7c87bddacff191d5f45431e8f08d23"),
+        ("Linux", "amd64"): ("linux_amd64.tar.gz", "4f8855647b3107b83e6b4a2d9418f95d8c53c57827b7f0910cf5ee9c849ff88b"),
+        ("Darwin", "amd64"): ("darwin_amd64.tar.gz", "a9f91c8ae68536b43a6e34178bcc9bd3233c4f684e4b83015ca331eebf5292bb"),
+        ("Darwin", "arm64"): ("darwin_aarch64.tar.gz", "2294797c40ca0dffb89984e88efb242378cd538f3086ab301ad733c7c0c151c9"),
+    },
 }
 
 
-def download_host(directory):
+def download_host(directory, version):
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"
-    suffix, expected = HOST_PACKAGES[(platform.system(), arch)]
-    name = f"CLIProxyAPI_{HOST_VERSION}_{suffix}"
+    suffix, expected = HOST_PACKAGES[version][(platform.system(), arch)]
+    name = f"CLIProxyAPI_{version}_{suffix}"
     archive = directory / name
-    url = f"https://github.com/router-for-me/CLIProxyAPI/releases/download/v{HOST_VERSION}/{name}"
-    with urllib.request.urlopen(url, timeout=120) as response:
-        archive.write_bytes(response.read())
+    url = f"https://github.com/router-for-me/CLIProxyAPI/releases/download/v{version}/{name}"
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                archive.write_bytes(response.read())
+            break
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
     if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
         raise RuntimeError("CPA 宿主包 SHA256 不匹配")
     executable = directory / ("cli-proxy-api.exe" if os.name == "nt" else "cli-proxy-api")
@@ -130,9 +144,11 @@ class Mock(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library", required=True, type=Path)
-    parser.add_argument("--host", type=Path, help="复用本机已验证的 CPA v8.0.52 可执行文件")
+    parser.add_argument("--host-version", choices=tuple(HOST_PACKAGES), default="8.0.52")
+    parser.add_argument("--host", type=Path, help="复用与 --host-version 一致的已核验宿主")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--observe", action="store_true", help="记录旧版本失败项，用于修复前对照")
+    parser.add_argument("--registration-only", action="store_true", help="仅验证宿主版本、注册和菜单能力")
     args = parser.parse_args()
     library = args.library.resolve(strict=True)
     checks = []
@@ -145,6 +161,7 @@ def main():
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     process = None
     output = []
+    actual_host_version = None
 
     def check(name, passed):
         checks.append({"name": name, "passed": bool(passed)})
@@ -165,7 +182,7 @@ def main():
         return None
 
     try:
-        executable = args.host.resolve(strict=True) if args.host else download_host(profile)
+        executable = args.host.resolve(strict=True) if args.host else download_host(profile, args.host_version)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -209,12 +226,15 @@ routing:
 """, encoding="utf-8")
 
         def request(path, body=None, key=None, headers=None, stream=False, method=None):
+            nonlocal actual_host_version
             req = urllib.request.Request(base + path,
                 None if body is None else json.dumps(body).encode(),
                 headers={"Authorization": "Bearer " + (key or management), "Content-Type": "application/json", **(headers or {})},
                 method=method)
             try:
                 with urllib.request.urlopen(req, timeout=30) as response:
+                    if path == "/v0/management/plugins":
+                        actual_host_version = response.headers.get("X-CPA-VERSION", "").removeprefix("v")
                     return response.read().decode() if stream else json.load(response)
             except urllib.error.HTTPError as failure:
                 # 只保留状态与固定错误码，不输出请求密钥或上游正文。
@@ -267,6 +287,16 @@ routing:
             request("/v0/management/auth-files/fields", {"name": path.name, **fields}, method="PATCH")
 
         start()
+        check("实际 CPA 宿主版本与验收目标一致", actual_host_version == args.host_version)
+        entry = next((entry for entry in request("/v0/management/plugins")["plugins"]
+            if entry["id"] == "factory-droid"), {})
+        check("插件完成注册并启用", entry.get("registered") is True and entry.get("effective_enabled") is True)
+        check("插件菜单已注册", any(menu.get("menu") == "Factory Droid" for menu in entry.get("menus", [])))
+        check("原生 OAuth 与额度能力已注册", entry.get("supports_oauth") is True and entry.get("supports_quota") is True)
+        if args.registration_only:
+            return 0 if args.observe or all(row["passed"] for row in checks) else 1
+        page = request("/v0/resource/plugins/factory-droid/index.html", stream=True)
+        check("插件页面资源可访问", "Factory Droid" in page and "account-form" in page)
         added = request("/v0/management/plugins/factory-droid/accounts",
             {"label": "本机模拟凭证", "api_key": "fk-local-integration-only", "enabled": True})
         check("原生凭据创建并发布模型", added["ok"] and "factory/gpt-5.4" in models())
@@ -326,6 +356,11 @@ routing:
         check("CPA 支持隐藏全部模型", bool(wait_until(lambda: not models())))
         check("全部模型被排除仍视为正常", status()["health"] == "ready")
         update_auth(auth_file, prefix="", excluded_models=[], model_aliases=[])
+        # CPA v8.0.47 can retain an old model_aliases attribute after a generic
+        # fields PATCH. Reset the fixture through a fresh host load; this does
+        # not claim that hot removal of native aliases has been repaired.
+        stop()
+        start()
         restored = wait_until(lambda: models() == original_models)
         if not restored:
             print(json.dumps({"expected_models": original_models, "actual_models": models(),
@@ -368,7 +403,8 @@ routing:
                 process.wait(timeout=10)
         mock.shutdown()
         mock.server_close()
-        report = {"at": datetime.now(timezone.utc).isoformat(), "host": f"CPA v{HOST_VERSION}",
+        report = {"at": datetime.now(timezone.utc).isoformat(), "host": f"CPA v{args.host_version}",
+            "actual_host_version": actual_host_version,
             "platform": platform.system(), "library_sha256": hashlib.sha256(library.read_bytes()).hexdigest(),
             "real_upstream": False, "checks": checks}
         if args.report:
