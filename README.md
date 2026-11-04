@@ -175,7 +175,7 @@ Content-Type: application/json
 
 旧插件账本和价格字段保留用于兼容读取，不自动删除或转换成 CPA 历史。卸载前可在 CPA 原生凭证页移除账号。一个插件数据目录只供一个 CPA 进程使用。
 
-版本变化见 [v0.1.5 发布说明](docs/releases/v0.1.5.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
+版本变化见 [v0.1.6 发布说明](docs/releases/v0.1.6.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
 
 ### CPA Manager Plus 原生额度
 

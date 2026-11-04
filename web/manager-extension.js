@@ -436,7 +436,7 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     if (timer) return;
     timer = setTimeout(async () => {
       timer = 0;
-      if (!updatePageEntry() || !authorized()) return;
+      if (!authorized() || !updatePageEntry()) return;
       await snapshotReady;
       if (!accountsPage() || !authorized()) return;
       if (!accountsChecked) {
@@ -451,7 +451,7 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefres
     if (records.some((record) => !record.target.closest?.(`[${OWN}]`))) schedule();
   });
   observer.observe(document.body, { subtree: true, childList: true });
-  const routeChanged = () => { updatePageEntry(); schedule(); };
+  const routeChanged = () => { updatePageEntry(); authorized(); schedule(); };
   addEventListener("hashchange", routeChanged);
   addEventListener("popstate", routeChanged);
   addEventListener("storage", (event) => { if (event.key === "cli-proxy-auth" || event.key === null) { authorized(); schedule(); } });
