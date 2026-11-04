@@ -123,16 +123,12 @@ fn check_route(data: &Value, expected: Format) -> Result<()> {
             "请求路径或操作不匹配",
         ));
     }
-    let upgraded = header_values(&data["Headers"], "Upgrade")
+    // Proxies can send Connection: upgrade on ordinary HTTP requests.
+    // Require an explicit protocol offer before rejecting the request.
+    let requests_upgrade = header_values(&data["Headers"], "Upgrade")
         .iter()
-        .any(|v| !v.trim().is_empty())
-        || header_values(&data["Headers"], "Connection")
-            .iter()
-            .any(|v| {
-                v.split(',')
-                    .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
-            });
-    if upgraded {
+        .any(|v| !v.trim().is_empty());
+    if requests_upgrade {
         return Err(Fault::new(
             400,
             "unsupported_operation",

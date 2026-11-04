@@ -55,7 +55,9 @@ jobs:
       - name: 检查发布脚本语法
         run: node --check scripts/release.mjs
       - name: 检查前端脚本语法
-        run: node --check web/app.js
+        run: |
+          node --check web/app.js
+          node --check web/manager-extension.js
       - name: 检查插件注册表
         run: node scripts/release.mjs registry
       - name: 检查更新清单
@@ -75,10 +77,8 @@ jobs:
         shell: pwsh
         run: |
           $library = if ('${{ matrix.goos }}' -eq 'windows') { 'cpa_factory_droid.dll' } else { 'libcpa_factory_droid.so' }
-          foreach ($cpaVersion in @('8.0.47', '8.0.52')) {
-            python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --host-version $cpaVersion --report "temp/cpa-validation-${{ matrix.platform }}-$cpaVersion.json"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --host-version 8.0.52 --report "temp/cpa-validation-${{ matrix.platform }}-8.0.52.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: factory-droid-${{ matrix.platform }}

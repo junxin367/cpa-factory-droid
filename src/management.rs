@@ -202,7 +202,8 @@ pub fn registration(data: &Value) -> Value {
     ].into_iter().map(|(method,path)|json!({"Method":method,"Path":format!("{base}/plugins/{PROVIDER}/{path}")})).collect();
     json!({"routes":routes,"resources":[
         {"Path":"/index.html","Menu":"Factory Droid","Description":"添加 Factory 凭据并自动同步模型"},
-        {"Path":"/app.js"},{"Path":"/style.css"}
+        {"Path":"/app.js"},{"Path":"/style.css"},
+        {"Path":"/manager-extension.js"},{"Path":"/manager-extension.css"}
     ]})
 }
 fn response(status: u16, content_type: &str, body: impl AsRef<[u8]>) -> Value {
@@ -230,6 +231,16 @@ pub fn handle(rt: &Arc<Runtime>, req: &Value) -> Value {
                 200,
                 "text/css; charset=utf-8",
                 include_bytes!("../web/style.css"),
+            ),
+            "/manager-extension.js" => response(
+                200,
+                "text/javascript; charset=utf-8",
+                include_bytes!("../web/manager-extension.js"),
+            ),
+            "/manager-extension.css" => response(
+                200,
+                "text/css; charset=utf-8",
+                include_bytes!("../web/manager-extension.css"),
             ),
             _ => response(404, "text/plain; charset=utf-8", "资源不存在"),
         };

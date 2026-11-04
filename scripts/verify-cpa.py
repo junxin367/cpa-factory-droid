@@ -3,6 +3,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -75,6 +76,8 @@ def download_host(directory, version):
 class Mock(BaseHTTPRequestHandler):
     whoami_calls = 0
     rotations = 0
+    inference_calls = 0
+    upgrade_calls = 0
     lock = threading.Lock()
 
     def log_message(self, *_):
@@ -89,6 +92,11 @@ class Mock(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        if self.path == "/api/billing/limits":
+            return self.reply({"limits": {
+                "standard": {"fiveHour": {"usedPercent": 2}, "weekly": {"usedPercent": 14},
+                             "monthly": {"usedPercent": 25, "secondsRemaining": 86400}},
+                "core": {"fiveHour": {"usedPercent": 0}}}})
         with self.lock:
             Mock.whoami_calls += 1
         self.reply({"userId": "mock-user", "email": "mock@example.test", "orgId": "mock-org", "region": "us"})
@@ -108,6 +116,12 @@ class Mock(BaseHTTPRequestHandler):
                 "refresh_token": f"mock-refresh-token-{Mock.rotations}", "expires_in": 3600,
                 "organization_id": "org_mock", "user": {"id": "user_mock"}})
         data = json.loads(raw)
+        with self.lock:
+            Mock.inference_calls += 1
+            if self.headers.get("Upgrade", "").strip() or any(
+                token.strip().lower() == "upgrade" for token in self.headers.get("Connection", "").split(",")
+            ):
+                Mock.upgrade_calls += 1
         probe = {"session": self.headers.get("x-session-id"), "cache": data.get("prompt_cache_key"),
             "safety": data.get("safety_identifier"), "input": data.get("input"), "messages": data.get("messages"),
             "conversation": data.get("conversation"), "previous_response_id": data.get("previous_response_id"),
@@ -139,6 +153,13 @@ class Mock(BaseHTTPRequestHandler):
                 return self.reply("event: response.completed\ndata: " +
                     json.dumps({"type": "response.completed", "response": value}) + "\n\n", "text/event-stream")
         self.reply(value)
+
+
+class CPARequestError(RuntimeError):
+    def __init__(self, path, status, code):
+        super().__init__(f"CPA {path} 返回 HTTP {status}")
+        self.status = status
+        self.code = code
 
 
 def main():
@@ -186,7 +207,6 @@ def main():
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        base = f"http://127.0.0.1:{port}"
         management, client, other = (secrets.token_urlsafe(32) for _ in range(3))
         for folder in ["auth", "plugins", "data"]:
             (profile / folder).mkdir()
@@ -227,18 +247,26 @@ routing:
 
         def request(path, body=None, key=None, headers=None, stream=False, method=None):
             nonlocal actual_host_version
-            req = urllib.request.Request(base + path,
-                None if body is None else json.dumps(body).encode(),
-                headers={"Authorization": "Bearer " + (key or management), "Content-Type": "application/json", **(headers or {})},
-                method=method)
+            # urllib forces Connection: close, hiding reverse-proxy upgrade-header regressions.
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
             try:
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    if path == "/v0/management/plugins":
-                        actual_host_version = response.headers.get("X-CPA-VERSION", "").removeprefix("v")
-                    return response.read().decode() if stream else json.load(response)
-            except urllib.error.HTTPError as failure:
-                # 只保留状态与固定错误码，不输出请求密钥或上游正文。
-                raise RuntimeError(f"CPA {path} 返回 HTTP {failure.code}") from None
+                connection.request(method or ("GET" if body is None else "POST"), path,
+                    body=None if body is None else json.dumps(body).encode(),
+                    headers={"Authorization": "Bearer " + (key or management), "Content-Type": "application/json", **(headers or {})})
+                response = connection.getresponse()
+                if path == "/v0/management/plugins":
+                    actual_host_version = response.headers.get("X-CPA-VERSION", "").removeprefix("v")
+                raw = response.read()
+                if response.status >= 400:
+                    # Do not expose credentials or upstream error bodies in diagnostics.
+                    try:
+                        code = json.loads(raw).get("error", {}).get("code")
+                    except (ValueError, AttributeError):
+                        code = None
+                    raise CPARequestError(path, response.status, code)
+                return raw.decode() if stream else json.loads(raw)
+            finally:
+                connection.close()
 
         def drain(pipe):
             for line in iter(pipe.readline, b""):
@@ -297,9 +325,20 @@ routing:
             return 0 if args.observe or all(row["passed"] for row in checks) else 1
         page = request("/v0/resource/plugins/factory-droid/index.html", stream=True)
         check("插件页面资源可访问", "Factory Droid" in page and "account-form" in page)
+        enhancement = request("/v0/resource/plugins/factory-droid/manager-extension.js", stream=True)
+        enhancement_css = request("/v0/resource/plugins/factory-droid/manager-extension.css", stream=True)
+        check("原生凭证额度增强资源已内嵌", "__factoryDroidQuotaEnhancement" in enhancement
+              and ".fd-quota-window" in enhancement_css and "native-quota-status" in page)
         added = request("/v0/management/plugins/factory-droid/accounts",
             {"label": "本机模拟凭证", "api_key": "fk-local-integration-only", "enabled": True})
         check("原生凭据创建并发布模型", added["ok"] and "factory/gpt-5.4" in models())
+        quota_auth = next(file for file in request("/v0/management/auth-files")["files"]
+                          if file.get("provider", file.get("type")) == "factory-droid")
+        quota = request("/v0/management/plugins/factory-droid/quota", {"auth_index": quota_auth["auth_index"]})
+        standard = next(group for group in quota["groups"] if group["displayName"] == "Factory 官方标准额度")
+        check("原生额度接口保留标准窗口名称和比例",
+              [bucket["window"] for bucket in standard["buckets"]] == ["标准 5 小时", "标准 7 天", "标准 30 天"]
+              and abs(standard["buckets"][2]["remainingFraction"] - 0.75) < 0.00001)
         auth_file = next((profile / "auth").glob("*.json"))
         original = json.loads(auth_file.read_text(encoding="utf-8"))
         original_models = models()
@@ -332,6 +371,28 @@ routing:
         for protocol, marker in [("anthropic", "message_stop"), ("responses", "response.completed"), ("chat", "[DONE]")]:
             check(f"{protocol} 原生非流式请求", bool(call(protocol=protocol)["session"]))
             check(f"{protocol} 原生流式请求", marker in call(protocol=protocol, stream=True))
+            for case, headers in [
+                ("孤立 Connection upgrade", {"Connection": "upgrade"}),
+                ("混合大小写连接标记", {"Connection": "keep-alive, UpGrAdE"}),
+                ("空 Upgrade", {"connection": "upgrade", "upgrade": ""}),
+            ]:
+                check(f"{protocol} 反代{case}保留 JSON 调用", bool(call(protocol=protocol, headers=headers)["session"]))
+                check(f"{protocol} 反代{case}保留 SSE 调用", marker in call(protocol=protocol, stream=True, headers=headers))
+            for case, headers in [
+                ("WebSocket", {"Connection": "upgrade", "Upgrade": "websocket"}),
+                ("独立 Upgrade", {"uPgRaDe": "h2c"}),
+            ]:
+                for stream in (False, True):
+                    before = Mock.inference_calls
+                    try:
+                        call(protocol=protocol, stream=stream, headers=headers)
+                    except CPARequestError as failure:
+                        rejected = failure.status == 400 and failure.code == "unsupported_operation"
+                    else:
+                        rejected = False
+                    check(f"{protocol} {'SSE' if stream else 'JSON'} 拒绝{case}且不访问上游",
+                        rejected and Mock.inference_calls == before)
+        check("反代升级标记不透传 Factory 上游", Mock.upgrade_calls == 0)
         cached = call(protocol="anthropic", cache_control={"type": "ephemeral", "ttl": "1h"})
         check("缓存断点原样保留", cached["cache_control"] == {"type": "ephemeral", "ttl": "1h"})
         stop()

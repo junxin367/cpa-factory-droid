@@ -16,6 +16,8 @@
 
 客户端使用表中的普通 HTTP JSON / SSE 调用方式。共享模型 ID 沿用其配置的同一协议，不会改变允许的入口。宿主内部调用也必须提供完整、同协议的路径上下文并通过相同门禁；缺少路径、WebSocket / Upgrade 或其他操作后缀不作为普通原生调用放行。
 
+协议升级以非空 `Upgrade` 请求头为判断依据。反向代理可能给普通请求附带 `Connection: upgrade`；当 `Upgrade` 缺失或为空时，三种原生入口的 JSON / SSE 请求均正常校验并转发，不把该连接标记误判为 WebSocket。显式的 `Upgrade: websocket`、`Upgrade: h2c` 等请求仍在访问 Factory 前返回 HTTP 400 `unsupported_operation`。这些反代升级标记不透传至 Factory。
+
 对于宿主能向插件提供入口格式证明的标准请求，结果如下；非流式和流式应用相同规则：
 
 | 客户端入口 | `anthropic` 模型 | `responses` 模型 | `chat_completions` 模型 |

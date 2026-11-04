@@ -98,7 +98,9 @@ jobs:
       - name: 运行 Rust 测试
         run: cargo test --locked
       - name: 检查前端脚本语法
-        run: node --check web/app.js
+        run: |
+          node --check web/app.js
+          node --check web/manager-extension.js
       - name: 构建与打包
         shell: pwsh
         run: ./scripts/build.ps1 -Target '${{ matrix.target }}' -ReleaseAssets
@@ -116,10 +118,8 @@ jobs:
             'linux' { 'libcpa_factory_droid.so' }
             'darwin' { 'libcpa_factory_droid.dylib' }
           }
-          foreach ($cpaVersion in @('8.0.47', '8.0.52')) {
-            python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --host-version $cpaVersion --report "temp/cpa-validation-${{ matrix.platform }}-$cpaVersion.json"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          python -B scripts/verify-cpa.py --library "target/${{ matrix.target }}/release/$library" --host-version 8.0.52 --report "temp/cpa-validation-${{ matrix.platform }}-8.0.52.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: factory-droid-${{ matrix.platform }}

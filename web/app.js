@@ -49,6 +49,7 @@
     $("connection-status").classList.add("connected");
     $("version").textContent = status.version ? "v" + status.version : "CPA 凭证接入";
     $("disconnect").hidden = false;
+    syncManagerEnhancement();
   }
   function disconnect() {
     state.epoch++;
@@ -66,6 +67,7 @@
     $("connection-status").classList.remove("connected");
     $("authorize").textContent = "连接管理端";
     $("disconnect").hidden = true;
+    try { window.parent.__factoryDroidQuotaEnhancement?.disconnect(); } catch { /* 跨源父页面不可访问。 */ }
   }
   $("authorize").onclick = () => { error("auth-error"); $("auth-dialog").showModal(); };
   $("close-auth").onclick = () => { if (!state.busy) $("auth-dialog").close(); };
@@ -152,6 +154,39 @@
     $("manage-credentials").href = href;
     $("success-link").href = href;
     $("oauth-login").href = "/management.html#/oauth" + (plus ? "#oauth-provider-factory-droid" : "");
+    if (plus) initializeManagerEnhancement();
+    for (const id of ["manage-credentials", "success-link", "oauth-login"]) {
+      $(id).onclick = (event) => {
+        try {
+          if (window.parent !== window && window.parent.location.origin === location.origin && window.parent.location.pathname === "/management.html") {
+            event.preventDefault();
+            window.parent.location.hash = new URL($(id).href).hash;
+          }
+        } catch { /* 普通链接仍可在跨源或独立页面中导航。 */ }
+      };
+    }
+  }
+  function syncManagerEnhancement() {
+    try {
+      const active = state.connected && window.parent.__factoryDroidQuotaEnhancement?.connect(state.token);
+      $("native-quota-status").hidden = !active;
+    } catch { /* 父页面不允许增强时保留凭证接入功能。 */ }
+  }
+  function initializeManagerEnhancement() {
+    try {
+      if (window.parent === window || window.parent.location.origin !== location.origin || window.parent.location.pathname !== "/management.html") return;
+      const parentDocument = window.parent.document;
+      if (window.parent.__factoryDroidQuotaEnhancement) { syncManagerEnhancement(); return; }
+      let script = parentDocument.getElementById("factory-droid-manager-extension");
+      if (!script) {
+        script = parentDocument.createElement("script");
+        script.id = "factory-droid-manager-extension";
+        script.src = "/v0/resource/plugins/factory-droid/manager-extension.js";
+        script.addEventListener("error", () => script.remove(), { once: true });
+        parentDocument.head.append(script);
+      }
+      script.addEventListener("load", syncManagerEnhancement, { once: true });
+    } catch { /* 不同源或受限 iframe 不注入父页面。 */ }
   }
   function initializeTheme() {
     const media = matchMedia("(prefers-color-scheme: dark)");
