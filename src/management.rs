@@ -205,7 +205,7 @@ pub fn registration(data: &Value) -> Value {
         {"Path":"/index.html","Menu":"Factory Droid","Description":"添加 Factory 凭据并自动同步模型"},
         {"Path":"/app.js"},{"Path":"/style.css"},
         {"Path":"/manager-extension.js"},{"Path":"/manager-extension.css"},{"Path":"/manager-usage.js"},
-        {"Path":"/manager-worker.js"},{"Path":"/manager-bootstrap.js"}
+        {"Path":"/manager-worker.js"},{"Path":"/manager-bootstrap.js"},{"Path":"/manager-refresh.js"}
     ]})
 }
 fn response(status: u16, content_type: &str, body: impl AsRef<[u8]>) -> Value {
@@ -253,6 +253,11 @@ pub fn handle(rt: &Arc<Runtime>, req: &Value) -> Value {
                 200,
                 "text/javascript; charset=utf-8",
                 include_bytes!("../web/manager-bootstrap.js"),
+            ),
+            "/manager-refresh.js" => response(
+                200,
+                "text/javascript; charset=utf-8",
+                include_bytes!("../web/manager-refresh.js"),
             ),
             "/manager-worker.js" => {
                 let mut result = response(

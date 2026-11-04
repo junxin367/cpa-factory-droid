@@ -175,7 +175,7 @@ Content-Type: application/json
 
 旧插件账本和价格字段保留用于兼容读取，不自动删除或转换成 CPA 历史。卸载前可在 CPA 原生凭证页移除账号。一个插件数据目录只供一个 CPA 进程使用。
 
-版本变化见 [v0.1.4 发布说明](docs/releases/v0.1.4.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
+版本变化见 [v0.1.5 发布说明](docs/releases/v0.1.5.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
 
 ### CPA Manager Plus 原生额度
 
@@ -187,7 +187,9 @@ Content-Type: application/json
 
 v0.1.4 起，卡片同时显示当前窗口已用费用 / Token 和可用的容量预测；详情抽屉提供前期、当前窗口已用、当前窗口预测三列。费用和请求数据直接读取 Manager 窗口统计接口，复用已有统一价格。窗口边界不完整、无请求样本或存在混合 Core 用量时，不生成虚构数值；未实际观测到上一周期时，比较区间标为“前一等长区间”。具体口径见 [窗口适配规则](docs/integrations/cpa-manager-plus/README.md)。
 
-额度仅在当前页面内存中缓存，按凭证名称和 `auth_index` 区分，退出或更换连接即清除。只对当前显示的 Factory 凭证按需查询，最多两个并发请求；失败后由用户点击重试，保留上次额度并显示错误，不沿用旧预测。增强不修改管理端文件，也不伪装凭证类型。
+v0.1.5 取消定时轮询额度。进入凭证页或切回 Factory 筛选时，每个当前显示的凭证只检查一次；距上次查询尝试不足 3 分钟则复用缓存，停留页面超过 3 分钟也不会自动刷新。刷新额度、刷新历史和页面刷新按钮仍可立即手动查询。自动加载开关只控制脚本加载，与自动查询额度无关。
+
+短期额度快照按管理连接、授权和凭证名称 / `auth_index` 隔离，保存在当前标签页的 `sessionStorage`，使整页重载也遵守 3 分钟间隔；不另存管理密钥，退出或更换连接即清理。查询最多两个并发，失败保留上次额度并提示，不沿用旧预测。重置时间在卡片进度条下方右侧显示“n 小时 / 天后”，悬停显示完整重置日期时间。增强不修改管理端文件，也不伪装凭证类型。
 
 ## 开发与构建
 
@@ -200,6 +202,7 @@ cargo fmt --check
 node --check web/app.js
 node --check web/manager-extension.js
 node --check web/manager-usage.js
+node --check web/manager-refresh.js
 node --check web/manager-worker.js
 node --check web/manager-bootstrap.js
 node --check scripts/release.mjs

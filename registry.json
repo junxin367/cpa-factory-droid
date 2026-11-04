@@ -6,7 +6,7 @@
       "name": "Factory Droid",
       "description": "通过 OAuth 或 API Key 接入 Factory，自动同步原生模型与官方额度，复用 CPA 凭证管理和用量统计。",
       "author": "junxin367",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "repository": "https://github.com/junxin367/cpa-factory-droid",
       "homepage": "https://github.com/junxin367/cpa-factory-droid",
       "license": "MIT",

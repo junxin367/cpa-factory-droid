@@ -1,10 +1,11 @@
 import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./manager-usage.js";
+import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, relativeReset, restoreRefreshSnapshot, serializeRefreshSnapshot } from "./manager-refresh.js";
 (() => {
   // Run in the parent's realm: the plugin iframe is destroyed on route changes.
   if (window.parent !== window || window.__factoryDroidQuotaEnhancement) return;
   const API = "/v0/management";
   const OWN = "data-factory-quota";
-  const MAX_AGE = 60000;
+  const MAX_AGE = ENTRY_REFRESH_INTERVAL;
   const accounts = new Map();
   const cache = new Map();
   const requests = new Set();
@@ -12,6 +13,37 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
   let token = "", scope = "", epoch = 0, running = 0, timer = 0;
   let accountsAt = 0, accountsRequest = null;
   let pending = new Map();
+  let pageRoute = "", accountsChecked = false;
+  const checkedThisVisit = new Set();
+  let snapshotKey = "", snapshotReady = Promise.resolve();
+
+  const accountsPage = () => /^#\/accounts(?:\?|$)/.test(location.hash);
+  function updatePageEntry() {
+    const active = accountsPage();
+    const provider = new URLSearchParams(location.hash.split("?")[1] || "").get("provider") || "all";
+    const route = active ? "accounts:" + provider : "";
+    if (route !== pageRoute) {
+      pageRoute = route; accountsChecked = false; checkedThisVisit.clear();
+    }
+    return active;
+  }
+  function saveSnapshot() {
+    if (!snapshotKey) return;
+    try { sessionStorage.setItem(snapshotKey, serializeRefreshSnapshot(cache)); } catch { /* Storage may be disabled. */ }
+  }
+  async function restoreSnapshot(currentToken, currentScope, currentEpoch) {
+    try {
+      const bytes = new TextEncoder().encode(location.origin + "\0" + currentScope + "\0" + currentToken);
+      const hash = await crypto.subtle.digest("SHA-256", bytes);
+      if (currentEpoch !== epoch || !authorized()) return;
+      snapshotKey = "factory-droid:quota-page:v1:" + [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      for (let index = sessionStorage.length - 1; index >= 0; index--) {
+        const key = sessionStorage.key(index);
+        if (key?.startsWith("factory-droid:quota-page:v1:") && key !== snapshotKey) sessionStorage.removeItem(key);
+      }
+      for (const [key, value] of restoreRefreshSnapshot(sessionStorage.getItem(snapshotKey))) if (!cache.has(key)) cache.set(key, value);
+    } catch { /* Continue with in-memory cooldown when storage/crypto is unavailable. */ }
+  }
 
   function sessionScope() {
     try {
@@ -49,6 +81,9 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
   }
   function disconnect() {
     epoch++;
+    if (snapshotKey) { try { sessionStorage.removeItem(snapshotKey); } catch { /* No storage access. */ } }
+    snapshotKey = ""; snapshotReady = Promise.resolve();
+    pageRoute = ""; accountsChecked = false; checkedThisVisit.clear();
     token = ""; scope = ""; accountsAt = 0; accountsRequest = null;
     for (const controller of requests) controller.abort();
     requests.clear(); accounts.clear(); cache.clear(); pending = new Map();
@@ -65,6 +100,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
     if (token !== nextToken || scope !== nextScope) {
       disconnect();
       token = nextToken; scope = nextScope;
+      snapshotReady = restoreSnapshot(token, scope, epoch);
     }
     schedule();
     return true;
@@ -134,11 +170,12 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
     if (!authorized() || !accounts.has(key)) return Promise.resolve();
     if (pending.has(key)) return pending.get(key);
     const previous = cache.get(key);
-    // Failed automatic loads wait for an explicit click, avoiding a retry loop.
-    if (!force && previous && (previous.error || Date.now() - previous.at < MAX_AGE)) return Promise.resolve();
+    if (!force && !canRefreshOnEntry(previous?.attemptAt)) return Promise.resolve();
     const account = accounts.get(key);
     const currentEpoch = epoch;
-    cache.set(key, { ...previous, loading: true, error: "", usageError: "", at: previous?.at || 0 });
+    const attemptAt = Date.now();
+    cache.set(key, { ...previous, attemptAt, loading: true, error: "", usageError: "", at: previous?.at || 0 });
+    saveSnapshot();
     const task = new Promise((resolve) => queue.push({
       epoch: currentEpoch, resolve,
       run: async () => {
@@ -147,7 +184,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
           if (currentEpoch !== epoch || !authorized() || !accounts.has(key)) return;
           let windows = normalizeQuota(data, account);
           const targets = buildTargets(account, windows, previous?.windows);
-          const current = { windows, at: Date.now(), loading: false, usageLoading: targets.length > 0, error: "", usageError: "" };
+          const current = { windows, attemptAt, at: Date.now(), loading: false, usageLoading: targets.length > 0, error: "", usageError: "" };
           cache.set(key, current); schedule();
           if (targets.length) {
             try {
@@ -163,8 +200,11 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
           }
         } catch (failure) {
           if (currentEpoch === epoch && authorized() && accounts.has(key))
-            cache.set(key, { ...previous, loading: false, usageLoading: false, at: previous?.at || 0, error: failure.message });
-        } finally { schedule(); }
+            cache.set(key, { ...previous, attemptAt, loading: false, usageLoading: false, at: previous?.at || 0, error: failure.message });
+        } finally {
+          if (currentEpoch === epoch && authorized()) saveSnapshot();
+          schedule();
+        }
       }
     }));
     pending.set(key, task);
@@ -209,6 +249,14 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
   const compactNumber = (number) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(number);
   const money = (number) => "$" + new Intl.NumberFormat("en-US", { notation: number >= 1000 ? "compact" : "standard", maximumFractionDigits: 2, minimumFractionDigits: number >= 1000 ? 0 : 2 }).format(number);
   const dateLabel = (ms) => ms ? new Date(ms).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+  function resetLabel(reset) {
+    const label = element("span", "fd-quota-reset", relativeReset(reset));
+    label.title = "重置时间：" + new Date(reset).toLocaleString("zh-CN", {
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+    });
+    label.setAttribute("aria-label", label.textContent + "，" + label.title);
+    return label;
+  }
   function emptyUsage(window, value, usage) {
     if (!window.start) return "窗口边界未返回";
     if (value.usageLoading) return "正在同步…";
@@ -245,7 +293,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
   function renderQuota(root, key) {
     const value = cache.get(key) || {};
     const detail = root.classList.contains("fd-quota-detail");
-    const signature = JSON.stringify([value.at, value.loading, value.usageLoading, value.error, value.usageError, value.windows, value.windows?.map((item) => Date.now() >= item.end || Date.now() - item.observedAt > 120000)]);
+    const signature = JSON.stringify([value.at, value.loading, value.usageLoading, value.error, value.usageError, value.windows, value.windows?.map((item) => [relativeReset(item.reset), Date.now() >= item.end || Date.now() - item.observedAt > 120000])]);
     if (root.factorySignature === signature) return;
     root.factorySignature = signature;
     const content = document.createDocumentFragment();
@@ -256,6 +304,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
       const predicted = forecast(item, { stale: Boolean(value.error || value.loading), usageError: value.usageError });
       const header = element("div", "fd-quota-header");
       header.append(element("span", "fd-quota-label", item.label), element("strong", "", item.percent === null ? "—" : `剩余 ${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(item.percent)}%`));
+      if (detail && item.reset) header.insertBefore(resetLabel(item.reset), header.lastChild);
       const track = element("div", "fd-quota-track");
       track.setAttribute("role", "progressbar");
       track.setAttribute("aria-label", item.label + "剩余额度");
@@ -266,9 +315,6 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
       bar.style.width = `${item.percent ?? 0}%`;
       bar.dataset.tone = item.percent === null ? "neutral" : item.percent <= 0 ? "bad" : item.percent < 20 ? "warn" : "good";
       track.append(bar); row.append(header, track);
-      if (item.reset) {
-        row.append(element("div", "fd-quota-meta", (item.reset <= Date.now() ? "窗口已到期 · " : "重置于 ") + dateLabel(item.reset)));
-      }
       if (detail) {
         const columns = element("div", "fd-usage-columns");
         columns.append(
@@ -282,21 +328,24 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
         row.append(evidence);
       } else {
         const line = element("div", "fd-usage-inline");
+        const amounts = element("span", "fd-usage-amounts");
         if (used) {
           const actualLabel = element("span", "fd-usage-actual", `已用 ${money(used.total_cost)} / ${compactNumber(used.total_tokens)}`);
           actualLabel.title = `当前窗口 CPA 用量：${used.total_tokens.toLocaleString("zh-CN")} Token；费用采用 Manager 统一价格。`;
-          line.append(actualLabel);
-        } else line.append(element("span", "fd-quota-meta", emptyUsage(item, value, item.current)));
+          amounts.append(actualLabel);
+        } else amounts.append(element("span", "fd-quota-meta", emptyUsage(item, value, item.current)));
         if (predicted) {
           const predictedLabel = element("span", "fd-usage-prediction", `预测 ${money(predicted.cost)} / ${compactNumber(predicted.tokens)}`);
           predictedLabel.title = "按本 CPA 已用量 ÷ 额度消耗比例估算窗口总容量，非官方余额。";
-          line.append(predictedLabel);
+          amounts.append(predictedLabel);
         }
+        line.append(amounts);
+        if (item.reset) line.append(resetLabel(item.reset));
         row.append(line);
       }
       content.append(row);
     }
-    if (!value.windows?.length) content.append(element("div", "fd-quota-meta", value.loading ? "正在刷新额度…" : value.error ? "" : "暂无标准额度数据"));
+    if (!value.windows?.length) content.append(element("div", "fd-quota-meta", value.loading ? "正在刷新额度…" : value.error ? "" : value.attemptAt && !canRefreshOnEntry(value.attemptAt) ? "3 分钟内已检查，可手动刷新" : "暂无标准额度数据"));
     if (value.error) {
       const message = element("div", "fd-quota-error", value.error + (value.windows?.length ? " · 显示上次结果" : ""));
       message.setAttribute("role", "status"); content.append(message);
@@ -328,7 +377,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
     }
   }
   function scan() {
-    if (!authorized() || !location.hash.startsWith("#/accounts")) return;
+    if (!authorized() || !accountsPage()) return;
     for (const card of document.querySelectorAll("article[data-account-card]")) {
       const key = card.getAttribute("data-account-card");
       if (!accounts.has(key)) continue;
@@ -337,7 +386,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
       if (empty) {
         if (!empty.hasAttribute("data-factory-quota-hidden")) empty.setAttribute("data-factory-quota-hidden", "");
         mountQuota(empty.parentElement, key);
-        void refresh(key);
+        refreshOnEntry(key);
       }
     }
     const params = new URLSearchParams(location.hash.split("?")[1] || "");
@@ -351,7 +400,7 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
     if (section && !section.querySelector("[data-quota-card-mode]")) {
       const empty = section.querySelector("p");
       if (empty && !empty.hasAttribute("data-factory-quota-hidden")) empty.setAttribute("data-factory-quota-hidden", "");
-      mountQuota(section, key, true); void refresh(key);
+      mountQuota(section, key, true); refreshOnEntry(key);
     }
     const historyButton = drawer.querySelector('[class*="quotaTabActions"] button');
     if (historyButton) {
@@ -362,12 +411,39 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
       }
     }
   }
+  function refreshOnEntry(key) {
+    if (checkedThisVisit.has(key)) return;
+    checkedThisVisit.add(key);
+    void refresh(key);
+  }
+  async function refreshVisibleAccounts() {
+    if (!accountsPage() || !authorized()) return;
+    const currentEpoch = epoch;
+    const keys = new Set([...document.querySelectorAll("article[data-account-card]")].map((card) => card.getAttribute("data-account-card")));
+    const selected = new URLSearchParams(location.hash.split("?")[1] || "").get("account");
+    if (selected) keys.add(selected);
+    accountsAt = 0;
+    try { await loadAccounts(); } catch { return; }
+    if (currentEpoch !== epoch || !accountsPage() || !authorized()) return;
+    for (const key of keys) {
+      if (!accounts.has(key)) continue;
+      checkedThisVisit.add(key);
+      void refresh(key, true);
+    }
+    schedule();
+  }
   function schedule() {
     if (timer) return;
     timer = setTimeout(async () => {
       timer = 0;
-      if (!authorized() || !location.hash.startsWith("#/accounts")) return;
-      try { await loadAccounts(); } catch { return; }
+      if (!updatePageEntry() || !authorized()) return;
+      await snapshotReady;
+      if (!accountsPage() || !authorized()) return;
+      if (!accountsChecked) {
+        // One discovery attempt per entry; DOM changes never trigger polling.
+        accountsChecked = true;
+        try { await loadAccounts(); } catch { return; }
+      }
       scan();
     }, 80);
   }
@@ -375,12 +451,19 @@ import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./ma
     if (records.some((record) => !record.target.closest?.(`[${OWN}]`))) schedule();
   });
   observer.observe(document.body, { subtree: true, childList: true });
-  addEventListener("hashchange", schedule);
-  addEventListener("popstate", schedule);
+  const routeChanged = () => { updatePageEntry(); schedule(); };
+  addEventListener("hashchange", routeChanged);
+  addEventListener("popstate", routeChanged);
   addEventListener("storage", (event) => { if (event.key === "cli-proxy-auth" || event.key === null) { authorized(); schedule(); } });
   addEventListener("unauthorized", disconnect);
-  // Also detect same-tab logout/connection switches without patching Manager's stores.
-  setInterval(() => { if (authorized() && !document.hidden) schedule(); }, 15000);
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest?.("button");
+    if (!button || button.hasAttribute(OWN)) return;
+    const label = button.getAttribute("aria-label") || button.title || button.textContent.trim();
+    if (label === "刷新" || label === "刷新全部") void refreshVisibleAccounts();
+  });
+  // No interval: staying on the page, DOM updates and returning to this tab
+  // cannot refresh quota. Only entering the account page or an explicit click can.
   const stylesheet = document.createElement("link");
   stylesheet.rel = "stylesheet";
   stylesheet.href = new URL("manager-extension.css", import.meta.url).href;

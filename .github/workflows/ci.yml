@@ -59,6 +59,7 @@ jobs:
           node --check web/app.js
           node --check web/manager-extension.js
           node --check web/manager-usage.js
+          node --check web/manager-refresh.js
           node --check web/manager-worker.js
           node --check web/manager-bootstrap.js
       - name: 检查插件注册表

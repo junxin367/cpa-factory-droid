@@ -18,7 +18,10 @@
 .fd-quota-detail .fd-quota-window { padding: 16px; gap: 10px; border: 1px solid var(--accounts-border, var(--border-color, #dce1e7)); border-radius: 12px; background: var(--accounts-surface, var(--bg-primary)); }
 .fd-quota-detail .fd-quota-label { font-size: 13px; }
 .fd-quota-detail .fd-quota-header strong { font-size: 15px; }
-.fd-usage-inline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-height: 16px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.fd-usage-inline { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 10px; min-height: 16px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.fd-usage-amounts { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; }
+.fd-quota-reset { margin-left: auto; flex-shrink: 0; white-space: nowrap; color: var(--accounts-muted, var(--text-secondary)); font-size: 11px; font-weight: 500; line-height: 1.5; }
+.fd-quota-detail .fd-quota-reset { margin-right: 8px; }
 .fd-usage-actual { color: var(--primary-color, #3883ff); }
 .fd-usage-prediction { color: #9670ed; }
 .fd-usage-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }

@@ -367,6 +367,9 @@ routing:
             check("窗口查询拒绝错配凭证身份", False)
         usage_module = request("/v0/resource/plugins/factory-droid/manager-usage.js", stream=True)
         check("窗口统计模块已内嵌并可加载", "export function buildTargets" in usage_module)
+        refresh_module = request("/v0/resource/plugins/factory-droid/manager-refresh.js", stream=True)
+        check("进入页面刷新策略与相对重置时间模块已内嵌",
+              "ENTRY_REFRESH_INTERVAL = 180000" in refresh_module and "export function relativeReset" in refresh_module)
         worker_headers = {}
         worker = request("/v0/resource/plugins/factory-droid/manager-worker.js", stream=True,
                          response_headers=worker_headers)
