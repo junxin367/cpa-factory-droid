@@ -6,7 +6,11 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{host::encode, protocol::Format, Fault, Result, Runtime, PROVIDER};
+use crate::{
+    host::{decode, encode},
+    protocol::{self, Format},
+    wire, Fault, Result, Runtime, PROVIDER,
+};
 
 pub const HEADER: &str = "X-Factory-Droid-Approval";
 const MAX_APPROVALS: usize = 4096;
@@ -20,6 +24,11 @@ struct Approval {
     path: String,
     stream: bool,
     created: Instant,
+    identity: Option<wire::Identity>,
+}
+pub struct ApprovedRequest {
+    pub headers: Value,
+    pub identity: Option<wire::Identity>,
 }
 #[derive(Default)]
 pub struct Approvals {
@@ -33,6 +42,7 @@ impl Approvals {
         source: &str,
         path: &str,
         stream: bool,
+        identity: Option<wire::Identity>,
     ) -> Result<String> {
         self.entries.retain(|_, a| a.created.elapsed() < TTL);
         if self.entries.len() >= MAX_APPROVALS {
@@ -52,6 +62,7 @@ impl Approvals {
                 path: path.into(),
                 stream,
                 created: Instant::now(),
+                identity,
             },
         );
         Ok(nonce)
@@ -59,7 +70,13 @@ impl Approvals {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
-    fn consume(&mut self, nonce: &str, data: &Value, expected: Format, path: &str) -> Result<()> {
+    fn consume(
+        &mut self,
+        nonce: &str,
+        data: &Value,
+        expected: Format,
+        path: &str,
+    ) -> Result<Option<wire::Identity>> {
         let approved = self.entries.remove(nonce).ok_or_else(missing)?;
         if approved.created.elapsed() >= TTL
             || data["AuthID"].as_str() != Some(&approved.auth_id)
@@ -72,7 +89,7 @@ impl Approvals {
         {
             return Err(missing());
         }
-        Ok(())
+        Ok(approved.identity)
     }
 }
 fn missing() -> Fault {
@@ -161,10 +178,10 @@ fn check_route(data: &Value, expected: Format, path: &str) -> Result<()> {
     }
     Ok(())
 }
-pub fn validate(rt: &Runtime, data: &Value, expected: Format) -> Result<Value> {
+pub fn validate(rt: &Runtime, data: &Value, expected: Format) -> Result<ApprovedRequest> {
     validate_path(rt, data, expected, expected.endpoint())
 }
-pub fn validate_count(rt: &Runtime, data: &Value, expected: Format) -> Result<Value> {
+pub fn validate_count(rt: &Runtime, data: &Value, expected: Format) -> Result<ApprovedRequest> {
     if expected != Format::Claude {
         return Err(Fault::new(
             400,
@@ -174,7 +191,12 @@ pub fn validate_count(rt: &Runtime, data: &Value, expected: Format) -> Result<Va
     }
     validate_path(rt, data, expected, COUNT_PATH)
 }
-fn validate_path(rt: &Runtime, data: &Value, expected: Format, path: &str) -> Result<Value> {
+fn validate_path(
+    rt: &Runtime,
+    data: &Value,
+    expected: Format,
+    path: &str,
+) -> Result<ApprovedRequest> {
     expected.check_formats(data)?;
     check_route(data, expected, path)?;
     if data["AuthProvider"].as_str() != Some(PROVIDER)
@@ -193,11 +215,15 @@ fn validate_path(rt: &Runtime, data: &Value, expected: Format, path: &str) -> Re
     if values.len() != 1 || values[0].len() > 64 {
         return Err(missing());
     }
-    rt.approvals
+    let identity = rt
+        .approvals
         .lock()
         .map_err(|_| Fault::new(503, "protocol_guard_failed", "原生协议校验状态不可用"))?
         .consume(values[0], data, expected, path)?;
-    Ok(clean_headers(&data["Headers"]))
+    Ok(ApprovedRequest {
+        headers: clean_headers(&data["Headers"]),
+        identity,
+    })
 }
 fn known_factory_auth(rt: &Runtime, auth_id: &str) -> bool {
     !auth_id.is_empty()
@@ -286,7 +312,7 @@ pub fn after(rt: &Arc<Runtime>, data: &Value) -> Value {
             expected.endpoint()
         };
         check_route(data, expected, path)?;
-        {
+        let (credential, selected) = {
             let store = rt.lock()?;
             let account = store.account_for_auth(auth_id).ok_or_else(|| {
                 Fault::new(
@@ -296,21 +322,41 @@ pub fn after(rt: &Arc<Runtime>, data: &Value) -> Value {
                 )
             })?;
             store.ensure_model_allowed(&account.id, &model)?;
-        }
+            let selected = store
+                .account_model(&account.id, &model.id)
+                .ok_or_else(missing)?;
+            (json!({"account_id":account.id}), selected)
+        };
+        let stream = data["Stream"].as_bool().unwrap_or(false);
+        let mut headers = json!({});
+        // Factory wrapping happens before CPA applies the final user payload rules.
+        // Keep only the opaque identity in the one-use approval, never the body.
+        let (body, identity) = if path == COUNT_PATH {
+            (None, None)
+        } else {
+            let request = protocol::request(&decode(&data["Body"])?, &selected, stream)?;
+            let identity = wire::identity(
+                rt,
+                &credential,
+                &data["Headers"],
+                &data["Metadata"],
+                &request,
+            )?;
+            headers = wire::request_beta_headers(&data["Headers"], &selected, &request)?;
+            let prepared = wire::payload(&request, &selected, &identity)?;
+            (Some(encode(prepared.to_string())), Some(identity))
+        };
         let nonce = rt
             .approvals
             .lock()
             .map_err(|_| Fault::new(503, "protocol_guard_failed", "原生协议校验状态不可用"))?
-            .issue(
-                auth_id,
-                model_id,
-                source,
-                path,
-                data["Stream"].as_bool().unwrap_or(false),
-            )?;
-        let mut headers = json!({});
+            .issue(auth_id, model_id, source, path, stream, identity)?;
         headers[HEADER] = json!([nonce]);
-        Ok(json!({"ClearHeaders":[HEADER],"Headers":headers}))
+        let mut result = json!({"ClearHeaders":[HEADER],"Headers":headers});
+        if let Some(body) = body {
+            result["Body"] = json!(body);
+        }
+        Ok(result)
     }));
     match attempt {
         Ok(Ok(value)) => value,
@@ -333,7 +379,7 @@ mod tests {
         let mut approvals = Approvals::default();
         for (issued, attempted) in [(COUNT_PATH, "/v1/messages"), ("/v1/messages", COUNT_PATH)] {
             let nonce = approvals
-                .issue("account", "model", "claude", issued, false)
+                .issue("account", "model", "claude", issued, false, None)
                 .unwrap();
             let data = json!({"AuthID":"account","Model":"model","SourceFormat":"claude",
                 "Stream":false,"Metadata":{"request_path":attempted}});
@@ -342,7 +388,7 @@ mod tests {
                 .is_err());
         }
         let nonce = approvals
-            .issue("account", "model", "claude", COUNT_PATH, false)
+            .issue("account", "model", "claude", COUNT_PATH, false, None)
             .unwrap();
         let data = json!({"AuthID":"account","Model":"model","SourceFormat":"claude",
             "Stream":false,"Metadata":{"request_path":COUNT_PATH}});

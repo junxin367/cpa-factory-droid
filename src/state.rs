@@ -89,7 +89,8 @@ pub struct Model {
     pub protocol: String,
     pub upstream_provider: String,
     pub enabled: bool,
-    pub supports_images: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
     pub context_length: u64,
     pub max_output_tokens: u64,
     pub input_multiplier: f64,
@@ -113,9 +114,9 @@ impl Default for Model {
             protocol: "chat_completions".into(),
             upstream_provider: "openai".into(),
             enabled: true,
-            supports_images: false,
+            supports_images: None,
             context_length: 0,
-            max_output_tokens: 8192,
+            max_output_tokens: 0,
             input_multiplier: 1.0,
             output_multiplier: 1.0,
             cache_multiplier: 1.0,
@@ -142,17 +143,31 @@ impl Model {
     }
 
     pub fn host_json(&self) -> Value {
-        json!({"ID":self.id,"Object":"model","OwnedBy":"factory","Type":PROVIDER,
+        let mut value = json!({"ID":self.id,"Object":"model","OwnedBy":"factory","Type":PROVIDER,
             "DisplayName":self.display_name,"Name":self.id,
             "Description":format!("Factory Droid 原生 {} 协议；可用性取决于账号权限",self.protocol),
-            "ContextLength":self.context_length,"InputTokenLimit":self.context_length,
-            "MaxCompletionTokens":self.max_output_tokens,"OutputTokenLimit":self.max_output_tokens,
-            "SupportedInputModalities":if self.supports_images{vec!["text","image"]}else{vec!["text"]},"SupportedOutputModalities":["text"],
+            "SupportedOutputModalities":["text"],
             "SupportedParameters":match self.protocol.as_str(){
                 "anthropic"=>vec!["tools","tool_choice","thinking","output_config"],
                 "responses"=>vec!["tools","tool_choice","reasoning","include"],
                 _=>vec!["tools","tool_choice","reasoning_effort"]},
-            "UserDefined":true})
+            "UserDefined":true});
+        if self.context_length > 0 {
+            value["ContextLength"] = json!(self.context_length);
+            value["InputTokenLimit"] = json!(self.context_length);
+        }
+        if self.max_output_tokens > 0 {
+            value["MaxCompletionTokens"] = json!(self.max_output_tokens);
+            value["OutputTokenLimit"] = json!(self.max_output_tokens);
+        }
+        if let Some(images) = self.supports_images {
+            value["SupportedInputModalities"] = json!(if images {
+                vec!["text", "image"]
+            } else {
+                vec!["text"]
+            });
+        }
+        value
     }
 }
 
@@ -306,7 +321,7 @@ pub fn default_models() -> Vec<Model> {
                 output_multiplier: rate,
                 cache_multiplier: rate,
                 cache_creation_multiplier: rate,
-                supports_images: id != "glm-5.3",
+                supports_images: Some(id != "glm-5.3"),
                 quota_pool: pool.into(),
                 quota_pool_source: "factory_registry".into(),
                 ..Model::default()
@@ -318,7 +333,9 @@ pub fn default_models() -> Vec<Model> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    pub request_timeout_seconds: u64,
+    // Accept old state and settings payloads without restoring an inference deadline.
+    #[serde(rename = "request_timeout_seconds", skip_serializing)]
+    pub legacy_request_timeout_seconds: Option<u64>,
     pub usage_window: String,
     pub period_start: Option<String>,
     pub period_end: Option<String>,
@@ -328,7 +345,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            request_timeout_seconds: 180,
+            legacy_request_timeout_seconds: None,
             usage_window: "calendar_month".into(),
             period_start: None,
             period_end: None,
@@ -339,9 +356,6 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
-        if !(10..=1800).contains(&self.request_timeout_seconds) {
-            return Err(Fault::input("超时必须为 10 至 1800 秒"));
-        }
         if !["calendar_month", "custom"].contains(&self.usage_window.as_str()) {
             return Err(Fault::input("统计窗口必须为 calendar_month 或 custom"));
         }
@@ -396,7 +410,6 @@ impl Settings {
                 ]
                 .contains(&m.upstream_provider.as_str())
                 || m.display_name.len() > 200
-                || m.max_output_tokens == 0
                 || m.max_output_tokens > 1_000_000
                 || !["standard", "core", "unknown"].contains(&m.quota_pool.as_str())
                 || !["explicit_config", "factory_registry", "unknown"]
@@ -701,6 +714,11 @@ impl Store {
             return Err(Fault::storage("插件状态版本不受支持"));
         }
         store.migrate_legacy_account_prices();
+        for model in &mut store.settings.models {
+            if model.quota_pool_source == "factory_registry" {
+                crate::catalog::apply_capabilities(model, None);
+            }
+        }
         store.settings.validate()?;
         if store.wire_namespace.is_empty() {
             store.wire_namespace = Uuid::new_v4().to_string();

@@ -93,6 +93,8 @@ struct Config {
     droid_cli_path: Option<PathBuf>,
     #[serde(rename = "discovery-timeout-seconds")]
     discovery_timeout_seconds: Option<u64>,
+    #[serde(rename = "upstream-error-body-limit-bytes")]
+    upstream_error_body_limit_bytes: Option<usize>,
 }
 
 pub struct Runtime {
@@ -152,6 +154,12 @@ impl Runtime {
             .is_some_and(|s| !(10..=120).contains(&s))
         {
             return Err(Fault::input("模型发现超时必须为10至120秒"));
+        }
+        if config
+            .upstream_error_body_limit_bytes
+            .is_some_and(|bytes| !(1024..=16 * 1024 * 1024).contains(&bytes))
+        {
+            return Err(Fault::input("上游错误正文上限必须为 1 KiB 至 16 MiB"));
         }
         if config.factory_client_version.as_ref().is_some_and(|s| {
             s.len() > 32
@@ -233,6 +241,11 @@ impl Runtime {
             .as_deref()
             .unwrap_or(wire::CLIENT_VERSION)
     }
+    pub fn error_body_limit(&self) -> usize {
+        self.config
+            .upstream_error_body_limit_bytes
+            .unwrap_or(upstream::DEFAULT_BODY_LIMIT)
+    }
     pub fn model(&self, id: &str) -> Result<Model> {
         let store = self.lock()?;
         if let Some(model) = store
@@ -259,7 +272,7 @@ impl Runtime {
             "Factory 模型未启用或映射不存在",
         ))
     }
-    pub fn operation(self: &Arc<Self>, callback: &str, timeout: u64) -> Result<Operation> {
+    pub fn operation(self: &Arc<Self>, callback: &str, timeout: Option<u64>) -> Result<Operation> {
         let _lifecycle = self.lifecycle_lock.lock().map_err(|_| Fault::internal())?;
         if self.closing.load(Ordering::Acquire) {
             return Err(Fault::new(503, "plugin_stopping", "插件正在停止"));
@@ -278,40 +291,33 @@ impl Runtime {
             .map_err(|_| Fault::internal())?
             .insert(id.clone(), callback.into());
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
-        let waiter = finished.clone();
-        let host = self.host;
-        let op_id = id.clone();
-        let cb = callback.to_string();
-        let downstream = Arc::new(Mutex::new(None::<String>));
-        let timed_downstream = downstream.clone();
-        let timer = thread::spawn(move || {
-            let (mutex, cv) = &*waiter;
-            if let Ok(done) = mutex.lock() {
-                if let Ok((done, elapsed)) =
-                    cv.wait_timeout_while(done, Duration::from_secs(timeout), |done| !*done)
-                {
-                    if !*done && elapsed.timed_out() {
-                        let _ = host.call(
-                            "host.http.cancel",
-                            &json!({"operation_id":op_id,"host_callback_id":cb}),
-                        );
-                        if let Ok(bound) = timed_downstream.lock() {
-                            if let Some(stream) = bound.as_ref() {
-                                let _=host.call("host.stream.close",&json!({"stream_id":stream,
-                                    "error_detail":Fault::new(504,"request_timeout","Factory 请求超过当前请求的超时限制").json()}));
-                            }
+        let timer = timeout.map(|timeout| {
+            let waiter = finished.clone();
+            let host = self.host;
+            let op_id = id.clone();
+            let cb = callback.to_string();
+            thread::spawn(move || {
+                let (mutex, cv) = &*waiter;
+                if let Ok(done) = mutex.lock() {
+                    if let Ok((done, elapsed)) =
+                        cv.wait_timeout_while(done, Duration::from_secs(timeout), |done| !*done)
+                    {
+                        if !*done && elapsed.timed_out() {
+                            let _ = host.call(
+                                "host.http.cancel",
+                                &json!({"operation_id":op_id,"host_callback_id":cb}),
+                            );
                         }
                     }
                 }
-            }
+            })
         });
         Ok(Operation {
             runtime: self.clone(),
             id,
             callback: callback.into(),
             finished,
-            timer: Some(timer),
-            downstream,
+            timer,
         })
     }
     pub fn begin(self: &Arc<Self>) -> Result<Active> {
@@ -453,13 +459,6 @@ pub struct Operation {
     pub callback: String,
     finished: Arc<(Mutex<bool>, Condvar)>,
     timer: Option<JoinHandle<()>>,
-    downstream: Arc<Mutex<Option<String>>>,
-}
-impl Operation {
-    fn bind_downstream(&self, id: &str) -> Result<()> {
-        *self.downstream.lock().map_err(|_| Fault::internal())? = Some(id.into());
-        Ok(())
-    }
 }
 impl Drop for Operation {
     fn drop(&mut self) {
@@ -489,11 +488,12 @@ fn register() -> Value {
             {"Name":"factory-client-version","Type":"string","Description":"Factory CLI 协议版本，默认 1.2.0；升级前核对官方请求"},
             {"Name":"droid-cli-path","Type":"string","Description":"自动同步官方目录的 Droid 原生可执行文件绝对路径；不配置时使用内置目录"},
             {"Name":"discovery-timeout-seconds","Type":"number","Description":"候选发现超时，默认30秒，范围10至120"},
+            {"Name":"upstream-error-body-limit-bytes","Type":"number","Description":"上游错误正文读取上限，默认1048576字节，范围1024至16777216；无额外读取超时"},
             {"Name":"api-base-url","Type":"string","Description":"Factory API 地址；本地模拟需同时启用 allow-local-mock"},
             {"Name":"allow-local-mock","Type":"boolean","Description":"仅允许显式 localhost/127.0.0.1/[::1] 模拟服务"}]},
         "capabilities":{"auth_provider":true,"model_provider":true,"executor":true,"executor_model_scope":"oauth",
         "executor_input_formats":["openai","claude","openai-response"],"executor_output_formats":["openai","claude","openai-response"],"quota_provider":true,
-        "request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":true,
+        "request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":false,
         "usage_plugin":false,"management_api":true}})
 }
 
@@ -523,7 +523,7 @@ mod registration_tests {
         assert_eq!(registration["schema_version"], 7);
         let caps = &registration["capabilities"];
         assert_eq!(caps["request_interceptor_omit_body_before"], true);
-        assert_eq!(caps["request_interceptor_omit_body_after"], true);
+        assert_eq!(caps["request_interceptor_omit_body_after"], false);
         assert_eq!(caps["auth_provider"], true);
         assert_eq!(caps["model_provider"], true);
         for field in [
@@ -594,6 +594,8 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
                     || old.config.factory_client_version != config.factory_client_version
                     || old.config.droid_cli_path != config.droid_cli_path
                     || old.config.discovery_timeout_seconds != config.discovery_timeout_seconds
+                    || old.config.upstream_error_body_limit_bytes
+                        != config.upstream_error_body_limit_bytes
                 {
                     return Err(Fault::input("修改数据目录或网络配置需要重启插件"));
                 }
@@ -724,16 +726,27 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
             "此固定账号模型不属于当前凭据",
         ));
     }
-    let request = protocol::request(&payload, &model, stream)?;
+    let mut request: Value =
+        serde_json::from_slice(&payload).map_err(|_| Fault::input("原生请求不是有效 JSON"))?;
+    if !request.is_object() {
+        return Err(Fault::input("原生请求必须为 JSON 对象"));
+    }
+    // Resolve CPA's internal public model ID only; preserve an explicit user override.
+    if request["model"].as_str() == Some(&model.id) {
+        request["model"] = json!(model.upstream_id);
+    }
+    let identity = native_headers
+        .identity
+        .as_ref()
+        .ok_or_else(|| Fault::new(400, "protocol_guard_missing", "缺少 Factory 请求封装状态"))?;
     let cb = data["host_callback_id"].as_str().unwrap_or("");
-    let timeout = rt.lock()?.settings.request_timeout_seconds;
-    let op = rt.operation(cb, timeout)?;
+    // Inference follows the host request lifecycle, including client cancellation.
+    let op = rt.operation(cb, None)?;
     if stream {
-        let downstream = data["stream_id"]
+        data["stream_id"]
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| Fault::input("宿主流 ID 缺失"))?;
-        op.bind_downstream(downstream)?;
     }
     let http = factory::llm_request(
         rt,
@@ -741,8 +754,9 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
         &model,
         &request,
         &op,
-        &native_headers,
+        &native_headers.headers,
         &data["Metadata"],
+        Some(identity),
     )?;
     if !stream {
         let response = rt.host.call("host.http.do", &http)?;
@@ -752,22 +766,27 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
             return Err(upstream::fault(
                 code,
                 &response["Headers"],
-                &upstream::body_prefix(&response["Body"]),
+                &upstream::body_prefix(&response["Body"], rt.error_body_limit() + 1),
+                rt.error_body_limit(),
             ));
         }
         let body = decode(&response["Body"])?;
         protocol::validate_response(&body, format)?;
-        return Ok(
-            json!({"Payload":encode(&body),"Headers":{"Content-Type":["application/json"]}}),
-        );
+        return Ok(json!({"Payload":encode(&body),
+            "Headers":upstream::response_headers(&response["Headers"], false)}));
     }
     let response = rt.host.call("host.http.do_stream", &http)?;
     let code = response["status_code"].as_u64().unwrap_or(502) as u16;
     let upstream_stream = response["stream_id"].as_str().unwrap_or("").to_string();
     if !(200..300).contains(&code) {
         access::invalidate_upstream(rt, &cred, &model, code);
-        let body = upstream::read_error_stream(rt.host, &upstream_stream);
-        return Err(upstream::fault(code, &response["headers"], &body));
+        let body = upstream::read_error_stream(rt.host, &upstream_stream, rt.error_body_limit());
+        return Err(upstream::fault(
+            code,
+            &response["headers"],
+            &body,
+            rt.error_body_limit(),
+        ));
     }
     if upstream_stream.is_empty() {
         return Err(Fault::new(
@@ -813,5 +832,5 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
         }
     }
     spawned?;
-    Ok(json!({"headers":{"Content-Type":["text/event-stream"],"Cache-Control":["no-cache"]}}))
+    Ok(json!({"headers":upstream::response_headers(&response["headers"], true)}))
 }

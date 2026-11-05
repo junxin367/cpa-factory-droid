@@ -31,7 +31,7 @@ API Key 接入通过 `host.auth.save` 保存凭据；OAuth 由 `auth.login.poll`
 
 注册声明 auth、model、executor、quota、management 和请求拦截能力。原生契约声明实际需要的 RPC Schema 7；不使用 Schema 8 的原始字节补丁、Schema 9 的多提供商目录或 Schema 10 的多 OAuth 入口扩展。已验证 CPA v8.0.47（最高 Schema 8）和 v8.0.52（最高 Schema 10）；CGO 关闭的 CPA 不能加载这些原生动态库。
 
-请求通过 `host.http.operation_open` 建立可取消操作，复用宿主 HTTP 与代理策略。流式执行先取得上游流和响应头，再由工作线程转发原生 chunks，并独立观察原生终态。超时仅取消本次 operation 及其绑定下游，不关闭其他并发请求。quiesce / shutdown 取消活动操作和发现进程，等待收尾；仍未结束时返回 draining 状态，不假装旧请求已完成。本机验收范围见 [验证记录](validation.md)。
+请求通过 `host.http.operation_open` 建立可取消操作，复用宿主 HTTP 与代理策略。模型推理的流式和非流式请求均不设置插件总时长上限，长上下文处理、长思考和持续输出不会因原来的 180 秒限制被插件中断；客户端取消和宿主请求生命周期仍然生效。旧状态与设置请求中的 `request_timeout_seconds` 仅兼容读取，不再生效或写回。流式执行先取得上游流和响应头，再由工作线程转发原生 chunks，并独立观察原生终态。身份、额度、OAuth 和基础连通性验证等管理操作保留各自的超时，且只取消本次 operation。quiesce / shutdown 取消活动操作和发现进程，等待收尾；仍未结束时返回 draining 状态，不假装旧请求已完成。本机验收范围见 [验证记录](validation.md)。
 
 ## 官方目录同步
 
@@ -57,6 +57,8 @@ CLI 的隔离环境、超时、进程取消、敏感字段拒绝及最大输出�
 插件同时声明上述三种 input / output format，让标准三入口精确选择自己的格式；这不构成允许跨协议的声明。`request.intercept_after` 在已选凭据和解析模型之后检查转换前 `SourceFormat`、`ToFormat`、所选 Factory auth、实际模型和请求路径。错配通过正常 RPC 结果中的显式终止响应返回 HTTP 400 `protocol_mismatch`，不发送 Factory 请求。
 
 由于宿主会在普通 interceptor RPC 错误时继续请求，仅抛出错误不能作为门禁。匹配的 Factory 请求会取得绑定本次 auth / model / 原始格式 / stream / 路径的一次性内部校验凭证；executor 在任何 Factory HTTP 之前复核该凭证、输入格式、输出格式、路径与凭据。凭证最多 4096 项、有效期 60 秒，不落盘；缺少、过期或不匹配时拒绝执行，内部凭证不转发给 Factory。其他 provider 不受 Factory 模型规则约束。
+
+鉴权后拦截阶段读取请求体，完成 Factory 身份、缓存与安全标识、默认参数和外层元数据处理，再交给 CPA 执行最终 payload 规则。一次性凭证只保留匿名会话和消息身份，不保存正文。执行器不再重新添加用户已过滤的字段或改写最终业务参数；仅将仍为当前 CPA 公共模型 ID 的字段解析为上游模型 ID，并将 SDK `betas` 选项消费到协议头。管理员的 payload 配置可覆盖默认封装，必须确保最终参数符合目标上游接口。
 
 匹配时在同一协议内保留消息、工具 ID、签名、redacted / encrypted 内容、cache_control、usage 与原生 SSE，不重建为其他协议。Factory 必需的上游模型、Droid identity / system / instructions、认证/路由头，以及注册表明确要求的 Fast / Ultra Fast 参数按协议处理；与快速模式冲突的客户端参数明确报错。检查已有 stream 值与宿主执行方式一致；流式执行且原生 stream 缺失或为 null 时补为 true。工具历史由客户端按原协议完整提供。图片能力仍由模型配置 `supports_images` 声明。
 

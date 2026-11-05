@@ -132,7 +132,7 @@ pub fn request(bytes: &[u8], model: &Model, stream: bool) -> Result<Value> {
     if stream && payload.get("stream").is_none_or(Value::is_null) {
         payload["stream"] = json!(true);
     }
-    if !model.supports_images {
+    if model.supports_images == Some(false) {
         let messages = if format == Format::Responses {
             &payload["input"]
         } else {

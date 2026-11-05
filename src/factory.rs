@@ -504,6 +504,7 @@ pub fn llm_request(
     op: &Operation,
     native_headers: &Value,
     metadata: &Value,
+    prepared_identity: Option<&wire::Identity>,
 ) -> Result<Value> {
     let base = llm_base(rt, cred)?;
     let path = match model.protocol.as_str() {
@@ -512,9 +513,27 @@ pub fn llm_request(
         _ => "/api/llm/o/v1/chat/completions",
     };
     let mut h = headers(rt, cred);
-    let identity = wire::identity(rt, cred, native_headers, metadata, request)?;
-    let request = wire::payload(request, model, &identity)?;
+    let identity = match prepared_identity {
+        Some(identity) => identity.clone(),
+        None => wire::identity(rt, cred, native_headers, metadata, request)?,
+    };
+    let mut request = if prepared_identity.is_some() {
+        request.clone()
+    } else {
+        wire::payload(request, model, &identity)?
+    };
+    let betas = wire::request_beta_headers(native_headers, model, &request)?;
+    for (name, values) in betas.as_object().into_iter().flatten() {
+        h[name] = values.clone();
+    }
     wire::apply_protocol_defaults(&mut h, model, &request)?;
+    // "betas" is an SDK transport option consumed into headers, not an API field.
+    if model.protocol == "anthropic" {
+        request
+            .as_object_mut()
+            .ok_or_else(Fault::internal)?
+            .remove("betas");
+    }
     h["Content-Type"] = json!(["application/json"]);
     h["x-api-provider"] = json!([model.upstream_provider]);
     h["x-session-id"] = json!([identity.session]);
@@ -547,15 +566,7 @@ pub fn upstream_error(status: u16, headers: &Value) -> Fault {
         "factory_upstream_error",
         message,
     );
-    error.retry_after_seconds = headers
-        .as_object()
-        .and_then(|o| {
-            o.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
-        })
-        .and_then(|(_, v)| v[0].as_str())
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|s| s.min(86400));
+    error.retry_after_seconds = crate::upstream::retry_after(headers, chrono::Utc::now());
     error
 }
 pub fn get(
@@ -566,7 +577,7 @@ pub fn get(
     timeout: u64,
     extra: Option<Value>,
 ) -> Result<(u16, Value)> {
-    let op = rt.operation(callback, timeout)?;
+    let op = rt.operation(callback, Some(timeout))?;
     let mut h = api_headers(rt, cred, path);
     if let Some(extra) = extra.and_then(|v| v.as_object().cloned()) {
         for (k, v) in extra {

@@ -585,6 +585,16 @@ fn validate_model(model: &Value) -> Result<()> {
             }
         }
     }
+    for value in [
+        &model["maxInputTokens"],
+        &model["maxOutputTokens"],
+        &model["contextLimits"]["maxInputTokens"],
+        &model["contextLimits"]["maxOutputTokens"],
+    ] {
+        if !value.is_null() && value.as_u64().is_none_or(|value| value == 0) {
+            return Err(invalid());
+        }
+    }
     for key in [
         "disabled",
         "deprecated",

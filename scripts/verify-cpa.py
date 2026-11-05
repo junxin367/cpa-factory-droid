@@ -2,6 +2,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from email.utils import formatdate
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -83,19 +84,43 @@ class Mock(BaseHTTPRequestHandler):
     lock = threading.Lock()
     error_mode = None
     error_status = 400
+    retry_after = "7"
+    inference_delay = 0
 
     def log_message(self, *_):
         pass
 
     def reply(self, value, content_type="application/json", status=200, headers=None):
         raw = value.encode() if isinstance(value, str) else json.dumps(value).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(raw)))
-        for name, value in (headers or {}).items():
-            self.send_header(name, value)
-        self.end_headers()
-        self.wfile.write(raw)
+        inference = self.path.endswith(("/messages", "/responses", "/chat/completions"))
+        delay = Mock.inference_delay if inference else 0
+        heartbeats = delay if content_type == "text/event-stream" else 0
+        heartbeat = b": waiting\n\n"
+        if inference and 200 <= status < 300:
+            headers = {
+                "Request-Id": "req_factory_success",
+                "X-RateLimit-Remaining": "12",
+                "Connection": "X-Upstream-Private",
+                "X-Upstream-Private": "private",
+                "Set-Cookie": "private=1",
+                **(headers or {}),
+            }
+        if delay and not heartbeats:
+            time.sleep(delay)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(raw) + len(heartbeat) * heartbeats))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            for _ in range(heartbeats):
+                self.wfile.write(heartbeat)
+                self.wfile.flush()
+                time.sleep(1)
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def do_GET(self):
         if self.path == "/api/billing/limits":
@@ -133,10 +158,11 @@ class Mock(BaseHTTPRequestHandler):
             ):
                 Mock.upgrade_calls += 1
         if Mock.error_mode:
-            headers = {"Request-Id": "req_factory_diagnostic", "Retry-After": "7"}
+            headers = {"Request-Id": "req_factory_diagnostic", "Retry-After": Mock.retry_after}
             if Mock.error_mode == "html":
                 return self.reply("<html>private proxy diagnostics</html>", "text/html", Mock.error_status, headers)
-            message = "L" * 40000 if Mock.error_mode == "oversized" else UPSTREAM_ERROR_MESSAGE
+            message = ("L" * (1024 * 1024 + 100) if Mock.error_mode == "oversized" else
+                       "L" * 40000 if Mock.error_mode == "large" else UPSTREAM_ERROR_MESSAGE)
             raw = json.dumps({"error": {"type": "invalid_request_error", "message": message,
                 "code": "invalid_feature_combination", "param": "thinking.display"},
                 "request_id": "req_factory_diagnostic"}).encode()
@@ -178,6 +204,9 @@ class Mock(BaseHTTPRequestHandler):
                     "message": "Messages feature beta missing or SDK-only betas body field present"}},
                     status=400, headers={"Request-Id": "req_strict_contract"})
         probe = {"session": self.headers.get("x-session-id"), "cache": data.get("prompt_cache_key"),
+            "upstream_model": data.get("model"),
+            "instructions": data.get("instructions"), "system": data.get("system"),
+            "max_tokens": data.get("max_tokens"), "max_output_tokens": data.get("max_output_tokens"),
             "safety": data.get("safety_identifier"), "input": data.get("input"), "messages": data.get("messages"),
             "conversation": data.get("conversation"), "previous_response_id": data.get("previous_response_id"),
             "metadata": data.get("metadata"), "cache_control": data.get("cache_control"),
@@ -271,6 +300,9 @@ def main():
         management, client, other = (secrets.token_urlsafe(32) for _ in range(3))
         for folder in ["auth", "plugins", "data"]:
             (profile / folder).mkdir()
+        (profile / "data/state.json").write_text(
+            json.dumps({"version": 1, "settings": {"request_timeout_seconds": 10}}),
+            encoding="utf-8")
         shutil.copy2(library, profile / "plugins" / ("factory-droid" + library.suffix))
         config = profile / "config.yaml"
         config.write_text(f"""config-version: 8
@@ -282,6 +314,8 @@ server:
 management:
   secret-key: "{management}"
   disable-control-panel: true
+requests:
+  passthrough-headers: true
 access:
   api-keys: ["{client}", "{other}"]
 oauth:
@@ -362,12 +396,13 @@ routing:
         def status():
             return request("/v0/management/plugins/factory-droid/status")["data"]
 
-        def call(text="A", headers=None, key=None, protocol="responses", stream=False, **fields):
+        def call(text="A", headers=None, key=None, protocol="responses", stream=False, response_headers=None, **fields):
             paths = {"responses": "/v1/responses", "anthropic": "/v1/messages", "chat": "/v1/chat/completions"}
             body = ({"model": "factory/gpt-5.4", "input": text, "store": False} if protocol == "responses" else
                 {"model": "factory/claude-opus-5-5" if protocol == "anthropic" else "factory/glm-5.3",
                     "messages": [{"role": "user", "content": text}], "max_tokens": 32})
-            result = request(paths[protocol], {**body, "stream": stream, **fields}, key or client, headers, stream)
+            result = request(paths[protocol], {**body, "stream": stream, **fields}, key or client, headers, stream,
+                             response_headers=response_headers)
             if stream:
                 return result
             if protocol == "anthropic":
@@ -512,6 +547,56 @@ console.log(JSON.stringify(checks));
         original = json.loads(auth_file.read_text(encoding="utf-8"))
         original_models = models()
         check("初始目录已同步", status()["health"] == "ready")
+        persisted_settings = json.loads((profile / "data/state.json").read_text(encoding="utf-8"))["settings"]
+        check("升级兼容旧超时配置且不再持久化请求时限", "request_timeout_seconds" not in persisted_settings)
+        try:
+            Mock.inference_delay = 12
+
+            def delayed_call(protocol, stream, marker):
+                started = time.monotonic()
+                try:
+                    result = call(protocol=protocol, stream=stream)
+                    completed = marker in result if stream else bool(result.get("session"))
+                except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+                    completed = False
+                return protocol, stream, completed and time.monotonic() - started >= 12
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                pending = [pool.submit(delayed_call, protocol, stream, marker)
+                    for protocol, marker in [("anthropic", "message_stop"),
+                        ("responses", "response.completed"), ("chat", "[DONE]")]
+                    for stream in (False, True)]
+                for task in pending:
+                    protocol, stream, completed = task.result()
+                    check(f"{protocol} {'持续 SSE' if stream else '等待首响应'}超过旧时限仍完整返回", completed)
+            check("长请求正常结束后释放所有操作", bool(wait_until(lambda: status()["active_requests"] == 0)))
+
+            for stream in (False, True):
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+                connection.connect()
+                transport = connection.sock
+
+                def receive():
+                    try:
+                        connection.request("POST", "/v1/responses",
+                            body=json.dumps({"model": "factory/gpt-5.4", "input": "cancel", "stream": stream}).encode(),
+                            headers={"Authorization": "Bearer " + client, "Content-Type": "application/json"})
+                        connection.getresponse().read()
+                    except (OSError, http.client.HTTPException):
+                        pass
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    pending = pool.submit(receive)
+                    try:
+                        check("取消前请求进入执行状态", bool(wait_until(lambda: status()["active_requests"] == 1)))
+                    finally:
+                        transport.shutdown(socket.SHUT_RDWR)
+                        connection.close()
+                    pending.result(timeout=5)
+                check(f"客户端取消{'流式' if stream else '非流式'}长请求后及时释放操作",
+                    bool(wait_until(lambda: status()["active_requests"] == 0, timeout=5)))
+        finally:
+            Mock.inference_delay = 0
         a = call("one", conversation="conv-a", prompt_cache_key="shared")
         b = call("two", conversation="conv-b", prompt_cache_key="shared")
         check("共享缓存组不合并明确对话", a["session"] != b["session"] and a["cache"] == b["cache"])
@@ -540,6 +625,14 @@ console.log(JSON.stringify(checks));
         for protocol, marker in [("anthropic", "message_stop"), ("responses", "response.completed"), ("chat", "[DONE]")]:
             check(f"{protocol} 原生非流式请求", bool(call(protocol=protocol)["session"]))
             check(f"{protocol} 原生流式请求", marker in call(protocol=protocol, stream=True))
+            for stream in (False, True):
+                returned_headers = {}
+                call(protocol=protocol, stream=stream, response_headers=returned_headers)
+                returned_headers = {name.lower(): value for name, value in returned_headers.items()}
+                check(f"{protocol} {'SSE' if stream else 'JSON'} 保留诊断和额度头且过滤连接与 Cookie",
+                    returned_headers.get("request-id") == "req_factory_success"
+                    and returned_headers.get("x-ratelimit-remaining") == "12"
+                    and "set-cookie" not in returned_headers and "x-upstream-private" not in returned_headers)
             client_headers = {
                 "anthropic-beta": "claude-code-20250219,cpa-client-2025-01-01",
                 "anthropic-version": "caller-version",
@@ -557,8 +650,10 @@ console.log(JSON.stringify(checks));
             expected_headers.update({"X-Factory-Client": "cli", "X-Client-Version": "1.2.0"})
             if protocol == "anthropic":
                 expected_headers.update({"Anthropic-Version": "2023-06-01",
-                    "Anthropic-Beta": "fine-grained-tool-streaming-2025-05-14"})
-            check(f"{protocol} 使用 Factory CLI 默认头且不透传调用者头",
+                    "Anthropic-Beta": "fine-grained-tool-streaming-2025-05-14,claude-code-20250219,cpa-client-2025-01-01"})
+            else:
+                expected_headers["OpenAI-Beta"] = "cpa=caller-proxy"
+            check(f"{protocol} 合并能力 beta 且继续隔离调用者身份头",
                   header_probe["wire_headers"] == expected_headers
                   and header_probe["user_agent"] == "factory-cli/1.2.0"
                   and header_probe["forwarded"] is None)
@@ -613,14 +708,15 @@ console.log(JSON.stringify(checks));
             headers={"Anthropic-Beta": "claude-code-20250219,arbitrary-caller-beta"})
         expected_flags = {"fine-grained-tool-streaming-2025-05-14",
             "thinking-display-updates-2026-08-18", "thinking-binding-controls-2026-08-01",
-            "context-management-2025-06-27", "advanced-tool-use-2025-11-20"}
+            "context-management-2025-06-27", "advanced-tool-use-2025-11-20",
+            "claude-code-20250219", "arbitrary-caller-beta"}
         check("完整 Claude 工具请求按功能生成 beta 且保留原生内容",
             set(feature_probe["wire_headers"]["Anthropic-Beta"].split(",")) == expected_flags
             and feature_probe["messages"] == feature_request["messages"]
             and feature_probe["thinking"] == feature_request["thinking"]
             and feature_probe["output_config"] == feature_request["output_config"]
             and feature_probe["tools"] == feature_request["tools"])
-        check("SDK betas 字段不作为请求体或调用者 Header 透传", feature_probe["betas"] is None)
+        check("SDK betas 合并到能力头且不进入上游正文", feature_probe["betas"] is None)
         check("完整 Claude 功能请求可通过严格上游 SSE 校验",
             "message_stop" in call(protocol="anthropic", stream=True, **feature_request))
         changed_turn = call(protocol="anthropic", messages=[
@@ -669,7 +765,7 @@ console.log(JSON.stringify(checks));
             for mode, stream, protocol in [
                 ("json", False, "anthropic"), ("json", True, "anthropic"),
                 ("split", True, "anthropic"), ("html", False, "anthropic"),
-                ("oversized", True, "anthropic"), ("stall", True, "anthropic"),
+                ("oversized", True, "anthropic"), ("large", False, "anthropic"), ("stall", True, "anthropic"),
                 ("json", False, "responses"), ("json", True, "responses"),
                 ("json", False, "chat"), ("json", True, "chat"),
             ]:
@@ -680,8 +776,8 @@ console.log(JSON.stringify(checks));
                 except CPARequestError as failure:
                     error_body = failure.body or {}
                     message = error_body.get("error", {}).get("message", "")
-                    valid = failure.status == 400 and len(message) <= 33000
-                    if mode in ("json", "split"):
+                    valid = failure.status == 400 and len(message) <= 1024 * 1024 + 128
+                    if mode in ("json", "split", "stall"):
                         expected_message = UPSTREAM_ERROR_MESSAGE
                         if protocol == "responses" and stream:
                             # This transformation belongs to CPA v8.0.52's
@@ -699,18 +795,85 @@ console.log(JSON.stringify(checks));
                     elif mode == "html":
                         valid &= message == "<html>private proxy diagnostics</html>"
                     elif mode == "oversized":
-                        valid &= message.endswith("[上游错误正文已达到 32 KiB 读取上限]")
+                        valid &= message.endswith("[上游错误正文超过 1048576 字节，已截断]")
+                    elif mode == "large":
+                        valid &= message == "L" * 40000
                 else:
                     valid = False
                 if mode == "stall":
-                    valid &= time.monotonic() - started < 5
+                    valid &= time.monotonic() - started >= 3.5
                 label = (f"{protocol} 上游错误 {mode}/{'SSE' if stream else 'JSON'} 原因不脱敏不替换且读取有界"
                     if not (protocol == "responses" and stream) else
                     "Responses SSE 原始错误经过宿主自身脱敏的边界已验证")
                 check(label, valid)
+            Mock.error_mode = "json"
+            for retry, expected in [("604800", 604800), (formatdate(time.time() + 259200, usegmt=True), 259200)]:
+                Mock.retry_after = retry
+                returned_headers = {}
+                try:
+                    call(protocol="responses", response_headers=returned_headers)
+                except CPARequestError as failure:
+                    retry_header = next((value for name, value in returned_headers.items()
+                        if name.lower() == "retry-after"), "0")
+                    check("上游 Retry-After 支持长等待和 HTTP 日期且不截断为一天",
+                        failure.status == 400 and expected - 5 <= int(retry_header) <= expected + 1)
+                else:
+                    check("上游 Retry-After 支持长等待和 HTTP 日期且不截断为一天", False)
         finally:
             Mock.error_mode = None
+            Mock.retry_after = "7"
         check("错误响应关闭后后续正常请求仍可调用", bool(call(protocol="anthropic")["session"]))
+
+        original_config = config.read_text(encoding="utf-8")
+        try:
+            for remove_cache in (False, True):
+                stop()
+                payload_rules = """
+  payload:
+    override:
+      - models:
+          - name: "factory/gpt-5.4"
+        params:
+          instructions: "configured instructions"
+          metadata.owner: "configured"
+          prompt_cache_key: "configured-cache"
+          model: "configured-upstream-model"
+          max_output_tokens: 24000
+      - models:
+          - name: "factory/claude-opus-5-5"
+        params:
+          system: "configured system"
+          max_tokens: 24000
+    filter:
+      - models:
+          - name: "factory/gpt-5.4"
+        params: ["safety_identifier"%s]
+""" % (', "prompt_cache_key"' if remove_cache else "")
+                config.write_text(original_config.replace(
+                    "  passthrough-headers: true\n", "  passthrough-headers: true\n" + payload_rules),
+                    encoding="utf-8")
+                start()
+                assert wait_until(lambda: "factory/gpt-5.4" in models())
+                configured = call(conversation="payload-final", prompt_cache_key="client-cache",
+                    safety_identifier="client-user")
+                check(f"CPA 最终 payload {'filter' if remove_cache else 'override'} 不被插件重写",
+                    configured["instructions"] == "configured instructions"
+                    and configured["metadata"] == {"owner": "configured"}
+                    and configured["cache"] == (None if remove_cache else "configured-cache")
+                    and configured["safety"] is None
+                    and configured["upstream_model"] == "configured-upstream-model"
+                    and configured["max_output_tokens"] == 24000)
+                claude_configured = call(protocol="anthropic")
+                check("CPA 配置的 Claude system 和输出参数在封装后保持最终值",
+                    claude_configured["system"] == "configured system"
+                    and claude_configured["max_tokens"] == 24000)
+                check("CPA payload 配置下三协议 SSE 正常结束", all(
+                    marker in call(protocol=protocol, stream=True)
+                    for protocol, marker in [("anthropic", "message_stop"),
+                        ("responses", "response.completed"), ("chat", "[DONE]")]))
+        finally:
+            stop()
+            config.write_text(original_config, encoding="utf-8")
         stop()
         start()
         assert wait_until(lambda: "factory/gpt-5.4" in models())
@@ -770,6 +933,39 @@ console.log(JSON.stringify(checks));
         check("插件状态不保存凭证或令牌", all(secret not in persisted for secret in
             ["fk-local-integration-only", "mock-access-token-", "mock-refresh-token-"]))
         check("最终目录和健康状态正常", bool(wait_until(lambda: status()["health"] == "ready")) and models() == original_models)
+
+        future_id = "future-openai-without-capability-data"
+        stored_models = json.loads((profile / "data/state.json").read_text(encoding="utf-8"))["settings"]["models"]
+        candidates = [{"id": model["upstream_id"], "displayName": model["display_name"],
+            "modelProvider": model["upstream_provider"] if model["upstream_provider"] in ("openai", "anthropic", "xai") else "factory"}
+            for model in stored_models]
+        future = {"id": future_id, "displayName": "Future model", "modelProvider": "openai"}
+        candidates.append(future)
+        update_auth(auth_file, factory_catalog={"version": 1, "candidates": candidates})
+        assert wait_until(lambda: "factory/" + future_id in models()), "未发布能力未知的新模型"
+        image_input = [{"role": "user", "content": [{"type": "input_image",
+            "image_url": "data:image/png;base64,AAAA"}]}]
+        forwarded = call(model="factory/" + future_id, input=image_input)
+        check("能力数据缺失的新模型仍将图片完整交给上游", forwarded["input"] == image_input)
+        check("能力未知的新模型图片 SSE 请求正常完成",
+            "response.completed" in call(model="factory/" + future_id, input=image_input, stream=True))
+        future_state = next(model for model in json.loads(
+            (profile / "data/state.json").read_text(encoding="utf-8"))["settings"]["models"]
+            if model["upstream_id"] == future_id)
+        check("未知模型不伪造 8192 输出限制或无图片能力",
+            future_state["max_output_tokens"] == 0 and future_state.get("supports_images") is None)
+        future["noImageSupport"] = True
+        update_auth(auth_file, factory_catalog={"version": 1, "candidates": candidates})
+        assert wait_until(lambda: any(model["upstream_id"] == future_id and model.get("supports_images") is False
+            for model in json.loads((profile / "data/state.json").read_text(encoding="utf-8"))["settings"]["models"]))
+        before = Mock.inference_calls
+        try:
+            call(model="factory/" + future_id, input=image_input)
+        except CPARequestError as failure:
+            rejected = failure.status == 400
+        else:
+            rejected = False
+        check("仅明确不支持图片的模型在访问上游前拒绝图片", rejected and Mock.inference_calls == before)
     finally:
         if process and process.poll() is None:
             process.terminate()

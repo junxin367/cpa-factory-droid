@@ -161,25 +161,30 @@ pub fn known_blocks(account: &Account, model: &Model) -> Vec<String> {
 
 pub fn register_discovered_models(store: &mut Store, candidates: &[Value]) -> Result<()> {
     let previous = store.settings.models.clone();
+    let mut changed = false;
     for candidate in candidates {
-        if store.settings.models.len() >= 1024 || !candidate_blocks(candidate).is_empty() {
+        if !candidate_blocks(candidate).is_empty() {
             continue;
         }
         let Some(model) = crate::catalog::model(candidate) else {
             continue;
         };
         // Native CPA credentials share one public ID per upstream model.
-        if store
+        if let Some(existing) = store
             .settings
             .models
-            .iter()
-            .any(|existing| existing.id == model.id)
+            .iter_mut()
+            .find(|existing| existing.id == model.id)
         {
+            changed |= crate::catalog::apply_capabilities(existing, Some(candidate));
             continue;
         }
-        store.settings.models.push(model);
+        if store.settings.models.len() < 1024 {
+            store.settings.models.push(model);
+            changed = true;
+        }
     }
-    if previous.len() != store.settings.models.len() {
+    if changed {
         if let Err(error) = store.settings.validate().and_then(|_| store.persist()) {
             store.settings.models = previous;
             return Err(error);
@@ -582,6 +587,10 @@ pub fn refresh_catalog(rt: &Arc<Runtime>, cred: &mut Value) -> Result<()> {
                     "isRouter",
                     "kind",
                     "noImageSupport",
+                    "maxInputTokens",
+                    "maxOutputTokens",
+                    "contextLimits",
+                    "supportedReasoningEfforts",
                     "tokenMultiplier",
                 ]
                 .contains(&name.as_str())
@@ -1146,11 +1155,17 @@ fn basic_call(
             }
         };
         let request = protocol::request(payload.to_string().as_bytes(), &model, false)?;
-        let op = rt.operation(
-            callback,
-            rt.lock()?.settings.request_timeout_seconds.min(60),
+        let op = rt.operation(callback, Some(60))?;
+        let http = factory::llm_request(
+            rt,
+            &cred,
+            &model,
+            &request,
+            &op,
+            &json!({}),
+            &json!({}),
+            None,
         )?;
-        let http = factory::llm_request(rt, &cred, &model, &request, &op, &json!({}), &json!({}))?;
         let response = rt.host.call("host.http.do", &http)?;
         let status = response["StatusCode"]
             .as_u64()

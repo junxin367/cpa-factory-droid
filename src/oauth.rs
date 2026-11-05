@@ -169,7 +169,7 @@ fn post(
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(fields.iter().copied())
         .finish();
-    let op = rt.operation(callback, 20)?;
+    let op = rt.operation(callback, Some(20))?;
     let response = rt.host.call(
         "host.http.do",
         &json!({"host_callback_id":callback,"operation_id":op.id,

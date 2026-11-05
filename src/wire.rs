@@ -41,6 +41,7 @@ impl Identifiers {
     }
 }
 
+#[derive(Clone)]
 pub struct Identity {
     pub session: String,
     pub cache: String,
@@ -332,6 +333,60 @@ pub fn payload(request: &Value, model: &Model, identity: &Identity) -> Result<Va
     Ok(payload)
 }
 
+pub fn request_beta_headers(headers: &Value, model: &Model, payload: &Value) -> Result<Value> {
+    let name = if model.protocol == "anthropic" {
+        "anthropic-beta"
+    } else {
+        "openai-beta"
+    };
+    let mut flags = Vec::<String>::new();
+    let mut add = |raw: &str| -> Result<()> {
+        for flag in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|flag| !flag.is_empty())
+        {
+            if !flag.bytes().all(|b| b.is_ascii_graphic() && b != b',') {
+                return Err(Fault::input("beta 标志必须为有效的可见 ASCII 字符串"));
+            }
+            if model.protocol == "anthropic"
+                && (flag.starts_with("server-side-fallback-")
+                    || flag.starts_with("fallback-credit-"))
+            {
+                return Err(Fault::new(
+                    400,
+                    "unsupported_native_feature",
+                    "Factory 插件尚未启用跨模型 fallback，不能启用对应 beta",
+                ));
+            }
+            if !flags.iter().any(|existing| existing == flag) {
+                flags.push(flag.into());
+            }
+        }
+        Ok(())
+    };
+    for raw in guard::header_values(headers, name) {
+        add(raw)?;
+    }
+    if model.protocol == "anthropic" {
+        if let Some(value) = payload.get("betas").filter(|value| !value.is_null()) {
+            let values = value
+                .as_array()
+                .ok_or_else(|| Fault::input("betas 必须为字符串数组"))?;
+            for value in values {
+                add(value
+                    .as_str()
+                    .ok_or_else(|| Fault::input("betas 必须为字符串数组"))?)?;
+            }
+        }
+    }
+    let mut result = json!({});
+    if !flags.is_empty() {
+        result[name] = json!([flags.join(",")]);
+    }
+    Ok(result)
+}
+
 fn beta(flags: &mut Vec<&'static str>, value: &'static str) {
     if !flags.contains(&value) {
         flags.push(value);
@@ -445,8 +500,20 @@ pub fn apply_protocol_defaults(headers: &mut Value, model: &Model, payload: &Val
             }
             content_betas(&message["content"], &mut flags);
         }
+        let mut merged: Vec<String> = flags.into_iter().map(str::to_string).collect();
+        for raw in guard::header_values(headers, "anthropic-beta") {
+            for flag in raw
+                .split(',')
+                .map(str::trim)
+                .filter(|flag| !flag.is_empty())
+            {
+                if !merged.iter().any(|existing| existing == flag) {
+                    merged.push(flag.into());
+                }
+            }
+        }
         headers["anthropic-version"] = json!([ANTHROPIC_VERSION]);
-        headers["anthropic-beta"] = json!([flags.join(",")]);
+        headers["anthropic-beta"] = json!([merged.join(",")]);
     }
     crate::catalog::apply_required_headers(headers, model);
     if let Some(values) = headers["anthropic-beta"].as_array() {
@@ -463,6 +530,37 @@ pub fn apply_protocol_defaults(headers: &mut Value, model: &Model, payload: &Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_betas_merge_with_required_flags_without_forwarding_transport_headers() {
+        let model = Model {
+            protocol: "anthropic".into(),
+            ..Model::default()
+        };
+        let mut headers = request_beta_headers(&json!({
+            "Anthropic-Beta":["future-feature-2099-01-01,fine-grained-tool-streaming-2025-05-14"],
+            "Authorization":["Bearer private"], "User-Agent":["private-client"]
+        }), &model, &json!({"betas":["future-feature-2099-01-01","body-feature-2099-01-01"]})).unwrap();
+        apply_protocol_defaults(&mut headers, &model, &json!({})).unwrap();
+        let flags = headers["anthropic-beta"][0].as_str().unwrap();
+        assert_eq!(flags.split(',').count(), 3);
+        assert!(flags.contains("future-feature-2099-01-01"));
+        assert!(flags.contains("body-feature-2099-01-01"));
+        assert!(headers.get("Authorization").is_none());
+        assert!(headers.get("User-Agent").is_none());
+        assert!(request_beta_headers(
+            &json!({"anthropic-beta":["bad\r\ninjection"]}),
+            &model,
+            &json!({})
+        )
+        .is_err());
+        assert!(request_beta_headers(
+            &json!({"anthropic-beta":["fallback-credit-2026-06-01"]}),
+            &model,
+            &json!({})
+        )
+        .is_err());
+    }
 
     #[test]
     fn anthropic_protocol_defaults_match_the_factory_cli_baseline() {

@@ -99,6 +99,7 @@ Linux 同样填写实际原生可执行文件的绝对路径。不要填写 `.cm
 | `factory-client-version` | `1.2.0` | 已采样的 Droid 客户端版本；修改前应重新核对实际报文 |
 | `droid-cli-path` | 未配置 | 官方 Droid 原生可执行文件的绝对路径，仅用于读取候选 |
 | `discovery-timeout-seconds` | `30` | 候选发现超时，范围 10–120 秒 |
+| `upstream-error-body-limit-bytes` | `1048576` | 上游错误正文最多读取 1 MiB，可配置 1024–16777216 字节；不额外设置错误读取超时 |
 | `api-base-url` | `https://api.factory.ai` | Factory API 地址，仅接受受信任 Factory HTTPS 域名 |
 | `allow-local-mock` | `false` | 开发联调开关，仅在显式开启时允许本机模拟服务 |
 
@@ -175,7 +176,7 @@ Content-Type: application/json
 
 旧插件账本和价格字段保留用于兼容读取，不自动删除或转换成 CPA 历史。卸载前可在 CPA 原生凭证页移除账号。一个插件数据目录只供一个 CPA 进程使用。
 
-版本变化见 [v0.1.7 发布说明](docs/releases/v0.1.7.md)，可复现检查及真实账号验证边界见 [兼容性验证记录](docs/compatibility-validation.md)。
+版本变化见 [v0.1.9 发布说明](docs/releases/v0.1.9.md)，本轮请求处理与模型能力验收见 [本机验证记录](docs/validation.md)，跨宿主支持范围见 [兼容性验证记录](docs/compatibility-validation.md)。
 
 ### CPA Manager Plus 原生额度
 
