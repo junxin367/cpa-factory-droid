@@ -1,6 +1,7 @@
 [data-factory-quota-hidden] { display: none !important; }
 [data-factory-quota="refresh"] { flex-shrink: 0; gap: 6px; }
 [data-factory-quota="refresh"][aria-busy="true"] svg { animation: fd-quota-spin 1s linear infinite; }
+.fd-plan-badge { display: inline-flex; align-items: center; flex-shrink: 0; max-width: 100%; height: 22px; padding: 0 8.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 6px; font-size: 11.5px; font-weight: 600; line-height: 1; background: color-mix(in srgb, var(--accounts-primary, var(--primary-color, #3883ff)) 9%, var(--accounts-muted-surface, var(--bg-secondary))); color: var(--accounts-primary, var(--primary-color, #3883ff)); border: 1px solid color-mix(in srgb, var(--accounts-primary, var(--primary-color, #3883ff)) 18%, transparent); }
 .fd-quota-windows { display: flex; flex-direction: column; gap: 8px; width: 100%; min-width: 0; }
 .fd-quota-window { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .fd-quota-window + .fd-quota-window { padding-top: 7px; border-top: 1px dashed var(--accounts-border, var(--border-color, #dce1e7)); }

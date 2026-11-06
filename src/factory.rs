@@ -855,6 +855,30 @@ fn quota_timestamp(value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
         })
         .filter(|date| date.timestamp_millis() > 0)
 }
+fn plan_label(value: &Value) -> Value {
+    let safe = safe_string(value, 100);
+    let Some(name) = safe.as_str().map(str::trim).filter(|name| !name.is_empty()) else {
+        return Value::Null;
+    };
+    json!(match name.to_ascii_lowercase().as_str() {
+        "pro" => "Pro",
+        "pro_plus" | "plus" => "Plus",
+        "ultra" | "max" => "Max",
+        "teams" => "Teams",
+        "business" => "Business",
+        "enterprise" => "Enterprise",
+        "free" => "Free",
+        _ => name,
+    })
+}
+fn subscription_plan(value: &Value) -> Value {
+    let subscription = &value["organization"]["subscription"];
+    let tier = plan_label(&subscription["factoryTier"]);
+    if !tier.is_null() {
+        return tier;
+    }
+    plan_label(&subscription["orbSubscription"]["plan"]["name"])
+}
 pub fn normalize_limits(value: &Value) -> Option<Value> {
     let mut windows = Vec::new();
     for (group, prefix) in [("standard", "标准"), ("core", "Droid Core")] {
@@ -900,7 +924,7 @@ pub fn normalize_limits(value: &Value) -> Option<Value> {
     }
     Some(
         json!({"status":"available","source":"factory_billing_limits","windows":windows,
-        "extra_usage_balance_usd":balance,"extra_usage_allowed":value["extraUsageAllowed"].as_bool(),"plan":safe_string(&value["planType"],100),
+        "extra_usage_balance_usd":balance,"extra_usage_allowed":value["extraUsageAllowed"].as_bool(),"plan":plan_label(&value["planType"]),
         "checked_at":now(),"message":"Factory 官方滚动窗口；额外用量余额仅来自官方字段"}),
     )
 }
@@ -913,8 +937,25 @@ fn fetch_limits(rt: &Arc<Runtime>, cred: &Value, callback: &str) -> Result<Value
             "Factory 额度查询失败",
         ));
     }
-    normalize_limits(&response)
-        .ok_or_else(|| Fault::new(502, "invalid_quota", "Factory 未返回可识别的额度数据"))
+    let mut limits = normalize_limits(&response)
+        .ok_or_else(|| Fault::new(502, "invalid_quota", "Factory 未返回可识别的额度数据"))?;
+    if limits["plan"].is_null() {
+        // Current limits responses omit the plan. The official billing page
+        // reads it from auth/me; a missing permission must not hide the quotas.
+        if let Ok((200, account)) = get(rt, cred, "/api/app/auth/me", callback, 10, None) {
+            let matches_org = match (
+                cred["org_id"].as_str().filter(|org| !org.is_empty()),
+                account["organization"]["id"].as_str(),
+            ) {
+                (Some(expected), Some(actual)) => expected == actual,
+                _ => true,
+            };
+            if matches_org {
+                limits["plan"] = subscription_plan(&account);
+            }
+        }
+    }
+    Ok(limits)
 }
 
 // The native CPA quota schema discards window boundaries. This management-only
@@ -962,6 +1003,7 @@ pub fn manager_quota(rt: &Arc<Runtime>, data: &Value, callback: &str) -> Result<
     };
     Ok(json!({
         "auth_index":index,"name":name,"provider":PROVIDER,
+        "subscription":{"plan":limits["plan"]},
         "observed_at_ms":chrono::Utc::now().timestamp_millis(),
         "windows":rows.into_iter().filter(|row|row["group"]=="standard").collect::<Vec<_>>(),
         "model_scope":{"kind":"all","complete":true},

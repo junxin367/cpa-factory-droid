@@ -79,6 +79,9 @@ def download_host(directory, version):
 class Mock(BaseHTTPRequestHandler):
     whoami_calls = 0
     rotations = 0
+    oauth_logins = 0
+    user_id = "mock-user"
+    org_id = "mock-org"
     inference_calls = 0
     upgrade_calls = 0
     lock = threading.Lock()
@@ -134,7 +137,7 @@ class Mock(BaseHTTPRequestHandler):
                          "monthly": {"usedPercent": 0}}}, "extraUsageAllowed": False})
         with self.lock:
             Mock.whoami_calls += 1
-        self.reply({"userId": "mock-user", "email": "mock@example.test", "orgId": "mock-org", "region": "us"})
+        self.reply({"userId": Mock.user_id, "email": "mock@example.test", "orgId": Mock.org_id, "region": "us"})
 
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -147,8 +150,15 @@ class Mock(BaseHTTPRequestHandler):
             if fields.get("grant_type") == ["refresh_token"]:
                 with self.lock:
                     Mock.rotations += 1
-            return self.reply({"access_token": f"mock-access-token-{Mock.rotations}",
-                "refresh_token": f"mock-refresh-token-{Mock.rotations}", "expires_in": 3600,
+                access_token = f"mock-access-token-{Mock.rotations}"
+                refresh_token = f"mock-refresh-token-{Mock.rotations}"
+            else:
+                with self.lock:
+                    Mock.oauth_logins += 1
+                access_token = f"mock-access-login-{Mock.oauth_logins}"
+                refresh_token = f"mock-refresh-login-{Mock.oauth_logins}"
+            return self.reply({"access_token": access_token,
+                "refresh_token": refresh_token, "expires_in": 3600,
                 "organization_id": "org_mock", "user": {"id": "user_mock"}})
         data = json.loads(raw)
         with self.lock:
@@ -924,6 +934,126 @@ console.log(JSON.stringify(checks));
         check("原生 OAuth 完成模拟授权", bool(authorized))
         oauth_file = next(path for path in (profile / "auth").glob("*.json")
             if json.loads(path.read_text(encoding="utf-8")).get("auth_method") == "oauth")
+        check("同身份 API Key 与 OAuth 凭证分别保存",
+              len(list((profile / "auth").glob("*.json"))) == 2
+              and json.loads(auth_file.read_text(encoding="utf-8"))["account_id"] == original["account_id"])
+
+        def complete_oauth_login():
+            login = request("/v0/management/factory-droid-auth-url")
+            state = urllib.parse.quote(login["state"])
+            return wait_until(lambda: request("/v0/management/get-auth-status?state=" + state).get("status") == "ok", 20)
+
+        def auth_records():
+            return {path.name: json.loads(path.read_text(encoding="utf-8"))
+                    for path in (profile / "auth").glob("*.json")}
+
+        initial = auth_records()
+        check("同账号重新授权成功", bool(complete_oauth_login()))
+        repeated = auth_records()
+        check("重新授权更新令牌而不增加凭证",
+              repeated.keys() == initial.keys()
+              and repeated[oauth_file.name]["account_id"] == initial[oauth_file.name]["account_id"]
+              and repeated[oauth_file.name]["access_token"] != initial[oauth_file.name]["access_token"]
+              and repeated[oauth_file.name]["refresh_token"] != initial[oauth_file.name]["refresh_token"])
+
+        # Simulate the random IDs and filenames emitted by older plugin versions.
+        # These are disposable fixtures inside this verifier's isolated profile.
+        stop()
+        legacy = repeated[oauth_file.name]
+        legacy.update(account_id="factory-legacy-oauth", label="保留的 OAuth 名称", priority=7, disabled=True,
+                      note="保留备注", prefix="oauth-team", excluded_models=["factory/glm-5.3"],
+                      model_aliases=[{"name": "factory/gpt-5.4", "alias": "oauth-friendly"}])
+        legacy_file = profile / "auth/factory-droid-factory-legacy-oauth.json"
+        assert oauth_file.is_relative_to(profile) and legacy_file.is_relative_to(profile)
+        oauth_file.rename(legacy_file)
+        oauth_file = legacy_file
+        oauth_file.write_text(json.dumps(legacy), encoding="utf-8")
+        start()
+        legacy_index = next(file["auth_index"] for file in request("/v0/management/auth-files")["files"]
+                            if file["name"] == oauth_file.name)
+        before_legacy = auth_records()
+        check("旧版随机文件名的 OAuth 凭证可重新授权", bool(complete_oauth_login()))
+        after_legacy = auth_records()
+        check("旧版重新授权保留文件名和原账号 ID",
+              after_legacy.keys() == before_legacy.keys()
+              and after_legacy[oauth_file.name]["account_id"] == "factory-legacy-oauth")
+        check("重新授权保留名称、优先级、备注和原生模型规则",
+              all(after_legacy[oauth_file.name].get(field) == legacy.get(field)
+                  for field in ["label", "disabled", "priority", "created_at", "note", "prefix", "excluded_models", "model_aliases"]))
+        check("重新授权不启用用户手动停用的凭证",
+              after_legacy[oauth_file.name].get("disabled") is True
+              and next(file for file in request("/v0/management/auth-files")["files"]
+                       if file["name"] == oauth_file.name).get("disabled") is True)
+        check("重新授权保留 CPA 原生凭证索引",
+              next(file["auth_index"] for file in request("/v0/management/auth-files")["files"]
+                   if file["name"] == oauth_file.name) == legacy_index)
+
+        Mock.org_id = "mock-other-org"
+        before_other_org = auth_records()
+        check("同一用户在其他组织可独立授权", bool(complete_oauth_login()))
+        after_other_org = auth_records()
+        check("不同组织不合并且不覆盖原凭证",
+              len(after_other_org) == len(before_other_org) + 1
+              and after_other_org[oauth_file.name] == before_other_org[oauth_file.name])
+        Mock.user_id, Mock.org_id = "mock-other-user", "mock-org"
+        before_other_user = auth_records()
+        check("相同邮箱的其他用户可独立授权", bool(complete_oauth_login()))
+        after_other_user = auth_records()
+        check("不同用户不依赖相同邮箱合并",
+              len(after_other_user) == len(before_other_user) + 1
+              and after_other_user[oauth_file.name] == before_other_user[oauth_file.name])
+
+        Mock.user_id = "mock-concurrent-user"
+        before_concurrent = auth_records()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            simultaneous = list(pool.map(lambda _: complete_oauth_login(), range(2)))
+        after_concurrent = auth_records()
+        check("同身份并发首次授权均完成且只新增一个凭证",
+              all(simultaneous) and len(after_concurrent) == len(before_concurrent) + 1)
+        concurrent_name = next(name for name in after_concurrent if name not in before_concurrent)
+        deleted_id = after_concurrent[concurrent_name]["account_id"]
+        request("/v0/management/auth-files?name=" + urllib.parse.quote(concurrent_name), method="DELETE")
+        check("隔离凭证按 CPA 原生删除流程删除", concurrent_name not in auth_records())
+        # Older plugin versions can retain a deletion tombstone in their cache.
+        stop()
+        cached = json.loads((profile / "data/state.json").read_text(encoding="utf-8"))
+        cached["accounts"][deleted_id].update(deleted=True, enabled=False)
+        (profile / "data/state.json").write_text(json.dumps(cached), encoding="utf-8")
+        start()
+        check("保留历史删除记录时允许同账号再次授权", bool(complete_oauth_login()))
+        after_recreation = auth_records()
+        recreated_name = next(name for name in after_recreation if name not in before_concurrent)
+        check("删除后重新授权使用新标识且不复活删除记录",
+              len(after_recreation) == len(after_concurrent)
+              and after_recreation[recreated_name]["account_id"] != deleted_id)
+        check("删除后再次重复授权仍复用同一凭证", bool(complete_oauth_login())
+              and auth_records().keys() == after_recreation.keys())
+        Mock.user_id = None
+        before_missing_identity = auth_records()
+        login = request("/v0/management/factory-droid-auth-url")
+        state = urllib.parse.quote(login["state"])
+        rejected_identity = wait_until(lambda:
+            request("/v0/management/get-auth-status?state=" + state).get("status") == "error", 20)
+        check("缺少官方用户 ID 时拒绝保存且不增加凭证",
+              bool(rejected_identity) and auth_records() == before_missing_identity)
+        Mock.user_id, Mock.org_id = "mock-user", "mock-org"
+
+        # Reauthorization does not clean up pre-existing duplicate files.
+        stop()
+        duplicate_file = profile / "auth/factory-droid-z-existing-duplicate.json"
+        duplicate = dict(after_legacy[oauth_file.name], account_id="factory-existing-duplicate", disabled=True)
+        duplicate_file.write_text(json.dumps(duplicate), encoding="utf-8")
+        legacy = json.loads(oauth_file.read_text(encoding="utf-8"))
+        legacy.update(prefix="", excluded_models=[], model_aliases=[], disabled=False)
+        oauth_file.write_text(json.dumps(legacy), encoding="utf-8")
+        start()
+        before_duplicates = auth_records()
+        check("已有重复项时仍可重新授权", bool(complete_oauth_login()))
+        after_duplicates = auth_records()
+        check("已有重复项不自动清理也不再新增",
+              after_duplicates.keys() == before_duplicates.keys()
+              and after_duplicates[duplicate_file.name] == before_duplicates[duplicate_file.name])
+
         update_auth(oauth_file, expires_at="2020-01-01T00:00:00Z", last_refresh="2019-01-01T00:00:00Z")
         stop()
         start()
@@ -931,7 +1061,8 @@ console.log(JSON.stringify(checks));
             and json.loads(oauth_file.read_text(encoding="utf-8")).get("refresh_token") == f"mock-refresh-token-{Mock.rotations}", 20)))
         persisted = (profile / "data/state.json").read_text(encoding="utf-8")
         check("插件状态不保存凭证或令牌", all(secret not in persisted for secret in
-            ["fk-local-integration-only", "mock-access-token-", "mock-refresh-token-"]))
+            ["fk-local-integration-only", "mock-access-token-", "mock-refresh-token-",
+             "mock-access-login-", "mock-refresh-login-"]))
         check("最终目录和健康状态正常", bool(wait_until(lambda: status()["health"] == "ready")) and models() == original_models)
 
         future_id = "future-openai-without-capability-data"

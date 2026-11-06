@@ -9,6 +9,7 @@
 - 使用 Factory 官方 Droid 客户端的 WorkOS 设备授权：`/user_management/authorize/device` 与 `/user_management/authenticate`。无需在 CPA 主机监听额外回调端口。
 - 轮询遵守服务端 `interval`；`slow_down` 至少增加 5 秒，拒绝和过期停止授权。临时网络故障保留当前会话，已交换成功的设备码不会重复消费。
 - 登录令牌没有组织范围时读取 `/api/cli/org`，与官方客户端一致使用返回的首个 WorkOS 组织，再通过 Factory `whoami` 确认实际组织、区域及专属主机。两类组织 ID 分开保存。
+- 同一 Factory 用户在同一组织重新 OAuth 授权时，更新已有 OAuth 凭证中的令牌，保留原账号 ID、文件名、启停状态、名称、优先级和原生模型规则；API Key、其他用户和其他组织的凭证分别保存。首次授权使用用户 ID 与组织 ID 生成的稳定文件名，避免同时授权生成重复文件。缺少可信身份或凭据列表读取失败时不新建；已有多个重复项时固定选取一条更新，不自动清理旧项。
 - CPA 依据 `expires_at`、`refresh_interval_seconds` 和 `NextRefreshAfter` 调度 `auth.refresh`。按真实到期时间提前 120 秒续期，不把官方“30 天轮换”说明当作 access token 的固定有效期。
 - 同一凭证的并发刷新串行执行；已轮换的旧 refresh token 复用内存中的新结果。身份或目录接口暂时失败时，仍交回新令牌给 CPA 保存，避免丢失轮换结果。
 - 密钥和令牌只保存在 CPA 认证文件；插件状态仅保留目录与脱敏身份。设备码会话最多 32 个，过期、插件停用或重启后失效。不读取用户现有 Droid 登录存储。

@@ -4,6 +4,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, TryLockError},
@@ -145,6 +146,153 @@ fn safe_identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn account_identity(cred: &Value) -> Option<(&str, &str)> {
+    if cred["type"] != PROVIDER || !is_oauth(cred) || cred["deleted"] == true {
+        return None;
+    }
+    Some((
+        cred["user_id"].as_str().filter(|s| safe_identifier(s))?,
+        cred["org_id"].as_str().filter(|s| safe_identifier(s))?,
+    ))
+}
+
+fn stable_account_id(user: &str, organization: &str, generation: usize) -> String {
+    // Use verified Factory identity, never email, a session ID, or a token.
+    let identity = format!("factory-droid:oauth\0{user}\0{organization}\0{generation}");
+    let digest: String = Sha256::digest(identity.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("factory-{digest}")
+}
+
+fn merge_reauthorization(existing: &Value, fresh: &Value) -> Value {
+    let mut merged = existing.clone();
+    for (key, value) in fresh.as_object().into_iter().flatten() {
+        if !["account_id", "label", "disabled", "priority", "created_at"].contains(&key.as_str()) {
+            merged[key] = value.clone();
+        }
+    }
+    if let Some(fields) = merged.as_object_mut() {
+        fields.remove("api_key");
+    }
+    merged
+}
+
+fn login_target(rt: &Arc<Runtime>, cred: &mut Value) -> Result<String> {
+    let (user, organization) = account_identity(cred).ok_or_else(|| {
+        Fault::new(
+            409,
+            "oauth_identity_missing",
+            "Factory 未返回有效的用户和组织 ID，暂未保存 OAuth 凭证",
+        )
+    })?;
+    let identity = (user.to_owned(), organization.to_owned());
+    let id = {
+        let store = rt.lock()?;
+        // A deleted account remains a tombstone to reject late callbacks. A new
+        // explicit login uses the next stable generation instead of reviving it.
+        (0..=store.accounts.len())
+            .map(|generation| stable_account_id(user, organization, generation))
+            .find(|id| {
+                !store
+                    .accounts
+                    .get(id)
+                    .is_some_and(|account| account.deleted)
+            })
+            .ok_or_else(Fault::internal)?
+    };
+    let canonical_name = format!("factory-droid-{id}.json");
+    let listed = rt.host.call("host.auth.list", &json!({}))?;
+    let mut files: Vec<_> = listed["files"]
+        .as_array()
+        .ok_or_else(|| Fault::new(503, "credential_not_loaded", "CPA 凭据列表尚未就绪"))?
+        .iter()
+        .filter(|file| file["provider"] == PROVIDER || file["type"] == PROVIDER)
+        .collect();
+    // Prefer the stable name, otherwise reuse one legacy file deterministically.
+    // Existing duplicates are neither merged nor removed by a login.
+    files.sort_by_key(|file| {
+        let name = file["name"].as_str().unwrap_or("");
+        (name != canonical_name, name)
+    });
+    for file in files {
+        let name = file["name"]
+            .as_str()
+            .filter(|s| factory::valid_auth_filename(s))
+            .ok_or_else(|| Fault::new(503, "credential_not_loaded", "CPA 凭据名称尚未就绪"))?;
+        let index = file["auth_index"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Fault::new(503, "credential_not_loaded", "CPA 凭据索引尚未就绪"))?;
+        let stored = rt
+            .host
+            .call("host.auth.get", &json!({"auth_index":index}))?;
+        let existing = &stored["json"];
+        if !existing.is_object() {
+            return Err(Fault::new(
+                503,
+                "credential_not_loaded",
+                "CPA 凭据内容尚未就绪",
+            ));
+        }
+        if account_identity(existing) != Some((&identity.0, &identity.1)) {
+            if name == canonical_name {
+                return Err(Fault::new(
+                    409,
+                    "credential_mismatch",
+                    "同名 Factory 凭据的身份不匹配，未覆盖原凭据",
+                ));
+            }
+            continue;
+        }
+        let existing_id = existing["account_id"]
+            .as_str()
+            .filter(|s| factory::valid_id(s))
+            .ok_or_else(|| Fault::input("已有 Factory OAuth 凭据的账号 ID 无效"))?;
+        let slot = rt
+            .oauth_rotations
+            .lock()
+            .map_err(|_| Fault::internal())?
+            .entry(existing_id.to_owned())
+            .or_default()
+            .clone();
+        let mut rotation = slot.lock().map_err(|_| Fault::internal())?;
+        // Re-read after any in-flight refresh so its latest metadata is preserved.
+        let stored = rt
+            .host
+            .call("host.auth.get", &json!({"auth_index":index}))?;
+        let existing = &stored["json"];
+        if account_identity(existing) != Some((&identity.0, &identity.1))
+            || existing["account_id"] != existing_id
+        {
+            return Err(Fault::new(
+                409,
+                "credential_changed",
+                "Factory 凭据在重新授权期间发生变化，请重试",
+            ));
+        }
+        let merged = merge_reauthorization(existing, cred);
+        // Old scheduled refresh snapshots must adopt the newly authorized tokens.
+        if existing["refresh_token"].is_string()
+            && existing["refresh_token"] != merged["refresh_token"]
+        {
+            rotation
+                .spent
+                .push(access::fingerprint(&existing["refresh_token"]));
+            if rotation.spent.len() > 16 {
+                rotation.spent.remove(0);
+            }
+        }
+        rotation.latest = Some(merged.clone());
+        *cred = merged;
+        return Ok(name.to_owned());
+    }
+    // Concurrent first logins resolve to the same file even before CPA saves it.
+    cred["account_id"] = json!(id);
+    Ok(canonical_name)
 }
 
 fn endpoint(rt: &Runtime, path: &str) -> String {
@@ -356,8 +504,7 @@ pub fn poll(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
             }
         }
         let mut cred = json!({"type":PROVIDER,"auth_method":"oauth",
-            "account_id":format!("factory-{}",Uuid::new_v4()),"label":"Factory",
-            "disabled":false,"priority":0,"created_at":now()});
+            "label":"Factory","disabled":false,"priority":0,"created_at":now()});
         apply_tokens(&mut cred, &response)?;
         session.device_code.clear();
         session.credential = Some(cred);
@@ -378,16 +525,25 @@ pub fn poll(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
     if let Some(email) = cred["email"].as_str().filter(|s| !s.is_empty()) {
         cred["label"] = json!(email.chars().take(80).collect::<String>());
     }
+    let name = match login_target(rt, cred) {
+        Ok(name) => name,
+        Err(error) if error.http_status >= 500 || error.http_status == 429 => {
+            return Ok(pending());
+        }
+        Err(error) => {
+            rt.oauth_sessions
+                .lock()
+                .map_err(|_| Fault::internal())?
+                .remove(state);
+            return Ok(login_error(&error.message));
+        }
+    };
     if access::refresh_catalog(rt, cred).is_err() {
         rt.host
             .log("Factory OAuth 已授权，官方目录暂不可用；使用内置目录并等待后续刷新");
         cred["factory_catalog_source"] = json!("bundled_registry");
         cred["factory_catalog_checked_at"] = json!(now());
     }
-    let name = format!(
-        "factory-droid-{}.json",
-        cred["account_id"].as_str().ok_or_else(Fault::internal)?
-    );
     let auth = factory::auth_data(cred, &name, &name);
     session.completed = Some(auth.clone());
     session.credential = None;
@@ -582,4 +738,88 @@ pub fn refresh(rt: &Arc<Runtime>, data: &Value, mut cred: Value) -> Result<Value
         refresh_at(&cred)
     };
     Ok(json!({"Auth":auth,"NextRefreshAfter":next.to_rfc3339()}))
+}
+
+#[cfg(test)]
+mod reauthorization_tests {
+    use super::*;
+
+    #[test]
+    fn account_identity_requires_oauth_and_verified_user_and_organization() {
+        let cred = json!({"type":PROVIDER,"auth_method":"oauth",
+            "user_id":"factory-user","org_id":"factory-org","email":"shared@example.test"});
+        assert_eq!(
+            account_identity(&cred),
+            Some(("factory-user", "factory-org"))
+        );
+        for patch in [
+            json!({"auth_method":"api_key"}),
+            json!({"type":"other-provider"}),
+            json!({"deleted":true}),
+            json!({"user_id":null}),
+            json!({"org_id":""}),
+            json!({"user_id":"invalid user"}),
+        ] {
+            let mut invalid = cred.clone();
+            for (key, value) in patch.as_object().unwrap() {
+                invalid[key] = value.clone();
+            }
+            assert_eq!(account_identity(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn first_login_id_is_stable_and_separates_users_and_organizations() {
+        let id = stable_account_id("user-a", "org-a", 0);
+        assert!(factory::valid_id(&id));
+        assert_eq!(id, stable_account_id("user-a", "org-a", 0));
+        assert_ne!(id, stable_account_id("user-b", "org-a", 0));
+        assert_ne!(id, stable_account_id("user-a", "org-b", 0));
+        assert_ne!(id, stable_account_id("user-a", "org-a", 1));
+        assert_ne!(
+            stable_account_id("ab", "c", 0),
+            stable_account_id("a", "bc", 0)
+        );
+    }
+
+    #[test]
+    fn reauthorization_replaces_tokens_and_preserves_native_configuration() {
+        let existing = json!({"type":PROVIDER,"auth_method":"oauth","account_id":"factory-legacy",
+            "label":"我的账号","disabled":true,"priority":9,"created_at":"2026-01-01T00:00:00Z",
+            "access_token":"old-access","refresh_token":"old-refresh","api_key":"legacy-unused",
+            "note":"保留备注","prefix":"team","excluded_models":["factory/example"],
+            "model_aliases":[{"name":"factory/example","alias":"custom"}],"proxy_url":"http://localhost:8080",
+            "factory_catalog":{"version":1,"candidates":[]}});
+        let fresh = json!({"type":PROVIDER,"auth_method":"oauth","account_id":"factory-provisional",
+            "label":"new@example.test","disabled":false,"priority":0,"created_at":"2026-11-06T00:00:00Z",
+            "access_token":"new-access","refresh_token":"new-refresh","expires_at":"2099-01-01T00:00:00Z",
+            "last_refresh":"2026-11-06T00:00:00Z","user_id":"user-a","org_id":"org-a"});
+        let merged = merge_reauthorization(&existing, &fresh);
+        for key in [
+            "account_id",
+            "label",
+            "disabled",
+            "priority",
+            "created_at",
+            "note",
+            "prefix",
+            "excluded_models",
+            "model_aliases",
+            "proxy_url",
+            "factory_catalog",
+        ] {
+            assert_eq!(merged[key], existing[key], "{key}");
+        }
+        for key in [
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "last_refresh",
+            "user_id",
+            "org_id",
+        ] {
+            assert_eq!(merged[key], fresh[key], "{key}");
+        }
+        assert!(merged.get("api_key").is_none());
+    }
 }

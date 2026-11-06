@@ -38,6 +38,7 @@ export function relativeReset(reset, now = Date.now()) {
 
 const validNumber = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 const validTime = (value) => value === null || validNumber(value) && value <= 8640000000000000;
+const planName = (value) => typeof value === "string" && value.length <= 100 ? value.trim() || null : null;
 const labels = { "5h": "5 小时", "7d": "7 天", "30d": "月额度" };
 function validUsage(usage) {
   return usage === null || usage && typeof usage === "object" &&
@@ -74,7 +75,7 @@ export function restoreRefreshSnapshot(raw, now = Date.now()) {
         validUsage(window.current) && validUsage(window.previous)
       );
     }).map(([key, value]) => [key, {
-      ...value, windows: value.windows.map((window) => ({ ...window, label: labels[window.name] })),
+      ...value, plan: planName(value.plan), windows: value.windows.map((window) => ({ ...window, label: labels[window.name] })),
       loading: false, usageLoading: false
     }]);
   } catch { return []; }
@@ -86,6 +87,7 @@ export function serializeRefreshSnapshot(cache, now = Date.now()) {
     entries: [...cache].filter(([, value]) => validNumber(value.attemptAt) && now - value.attemptAt < ENTRY_REFRESH_INTERVAL)
       .slice(-200).map(([key, value]) => [key, {
         at: value.at || 0, attemptAt: value.attemptAt,
+        plan: planName(value.plan),
         windows: value.windows || [], error: value.error || "", usageError: value.usageError || ""
       }])
   });

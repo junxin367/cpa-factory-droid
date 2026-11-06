@@ -191,7 +191,9 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, isExpiredWindow, nextCycleRe
           if (currentEpoch !== epoch || !authorized() || !accounts.has(key)) return;
           let windows = normalizeQuota(data, account);
           const targets = buildTargets(account, windows, previous?.windows);
-          const current = { windows, attemptAt, at: Date.now(), loading: false, usageLoading: targets.length > 0, error: "", usageError: "" };
+          const plan = data.data.subscription?.plan;
+          const current = { windows, plan: typeof plan === "string" ? plan.trim().slice(0, 100) : null,
+            attemptAt, at: Date.now(), loading: false, usageLoading: targets.length > 0, error: "", usageError: "" };
           cache.set(key, current); schedule();
           if (targets.length) {
             try {
@@ -398,6 +400,25 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, isExpiredWindow, nextCycleRe
       if (trigger.getAttribute("aria-label") !== label) trigger.setAttribute("aria-label", label);
     }
   }
+  function mountPlan(card, key) {
+    const badges = card.querySelector('[class*="accountGridCardMetaBadges"]');
+    let badge = card.querySelector(`[${OWN}="plan"]`);
+    const plan = cache.get(key)?.plan;
+    // Let Manager own the label when it gains native Factory plan support.
+    if (!badges || !plan || badges.querySelector(`[class*="accountPlanBadge"]:not([${OWN}])`)) {
+      badge?.remove();
+      return;
+    }
+    if (!badge) {
+      badge = element("span", "fd-plan-badge");
+      badge.setAttribute(OWN, "plan");
+    }
+    if (badge.textContent !== plan) {
+      badge.textContent = plan;
+      badge.title = "Factory 套餐：" + plan;
+    }
+    if (badges.firstChild !== badge) badges.prepend(badge);
+  }
   function scan() {
     if (!authorized() || !accountsPage()) return;
     const visibleKeys = new Set();
@@ -405,6 +426,7 @@ import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, isExpiredWindow, nextCycleRe
       const key = card.getAttribute("data-account-card");
       if (!accounts.has(key)) continue;
       visibleKeys.add(key);
+      mountPlan(card, key);
       ensureButton(card.querySelector('[class*="accountGridCardPrimaryActions"], [class*="accountQuickActionsGrid"]'), key, true);
       const empty = card.querySelector("[data-account-quota-empty]");
       if (empty) {
