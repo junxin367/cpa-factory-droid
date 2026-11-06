@@ -543,8 +543,23 @@ pub fn llm_request(
     if model.upstream_provider == "openai" {
         h["OpenAI-Platform"] = json!(["org-bHuLtG1fGmYk5YaOihAAXFBw"]);
     }
+    // 预算必须检查最终请求：在 CPA payload rules、模型替换及 SDK betas 清理之后。
+    let body = if model.protocol == "anthropic" {
+        let body = crate::request_size::prepare(&mut request)?;
+        if body.omitted_images > 0 {
+            rt.host.log(&format!(
+                "Factory 请求超过发送预算，省略 {} 张旧图片：{} → {} 字节",
+                body.omitted_images,
+                body.original_bytes,
+                body.bytes.len()
+            ));
+        }
+        body.bytes
+    } else {
+        serde_json::to_vec(&request).map_err(|_| Fault::internal())?
+    };
     Ok(
-        json!({"host_callback_id":op.callback,"operation_id":op.id,"method":"POST","url":format!("{base}{path}"),"headers":h,"body":encode(request.to_string())}),
+        json!({"host_callback_id":op.callback,"operation_id":op.id,"method":"POST","url":format!("{base}{path}"),"headers":h,"body":encode(body)}),
     )
 }
 pub fn upstream_error(status: u16, headers: &Value) -> Fault {
@@ -1040,4 +1055,129 @@ pub fn quota(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
         response["subscription"] = json!({"plan":plan});
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod request_size_tests {
+    use super::*;
+    use crate::request_size;
+
+    fn image(bytes: usize) -> Value {
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"A".repeat(bytes)}})
+    }
+
+    #[test]
+    fn image_budget_preserves_latest_comparison_tools_and_opaque_history() {
+        let mut old = image(1_800_000);
+        old["cache_control"] = json!({"type":"ephemeral","ttl":"1h"});
+        let mut original = json!({"model":"claude-opus-5-5","messages":[
+            {"role":"user","content":[old]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"分析","signature":"opaque-signature"},
+                {"type":"tool_use","id":"tool-1","name":"capture","input":{"example":image(200)}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1",
+                "is_error":false,"content":[{"type":"text","text":"历史结果"},image(1_800_000)]}]},
+            {"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"}]},
+            {"role":"user","content":[{"type":"text","text":"比较两张图片"},image(300_000),image(300_000)]}
+        ]});
+        let mut request = original.clone();
+        let body = request_size::prepare(&mut request).unwrap();
+        assert!(body.original_bytes > request_size::TARGET_BYTES);
+        assert!(body.bytes.len() <= request_size::TARGET_BYTES);
+        assert_eq!(body.omitted_images, 1);
+        assert_eq!(request["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            request["messages"][0]["content"][0]["cache_control"],
+            original["messages"][0]["content"][0]["cache_control"]
+        );
+        assert_eq!(
+            request["messages"].as_array().unwrap()[1..],
+            original["messages"].as_array().unwrap()[1..]
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body.bytes).unwrap(),
+            request
+        );
+
+        // 后续纯文本追问不会让旧图片重新出现，也不每轮机械移动保留窗口。
+        original["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role":"user","content":"继续分析"}));
+        request_size::prepare(&mut original).unwrap();
+        assert_eq!(
+            original["messages"].as_array().unwrap()[..5],
+            request["messages"].as_array().unwrap()[..]
+        );
+    }
+
+    #[test]
+    fn budget_counts_final_utf8_bytes_and_does_not_trim_at_the_boundary() {
+        let mut request = json!({"messages":[
+            {"role":"user","content":[image(512)]},
+            {"role":"user","content":[image(512)]}
+        ],"system":""});
+        let padding = request_size::TARGET_BYTES - serde_json::to_vec(&request).unwrap().len();
+        request["system"] = json!("x".repeat(padding));
+        let original = request.clone();
+        let exact = request_size::prepare(&mut request).unwrap();
+        assert_eq!(exact.bytes.len(), request_size::TARGET_BYTES);
+        assert_eq!(exact.omitted_images, 0);
+        assert_eq!(request, original);
+        request["system"] = json!(format!("{}中", request["system"].as_str().unwrap()));
+        let over = request_size::prepare(&mut request).unwrap();
+        assert_eq!(over.original_bytes, request_size::TARGET_BYTES + 3);
+        assert_eq!(over.omitted_images, 1);
+        assert!(over.bytes.len() <= request_size::TARGET_BYTES);
+    }
+
+    #[test]
+    fn retry_reduces_only_historical_image_blocks_and_keeps_http_identity() {
+        let request = json!({"messages":[
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true,
+                "content":[image(400),{"type":"document","source":{"type":"text","data":"重要文档"}},
+                    {"type":"text","text":"原始结果"}]}]},
+            {"role":"assistant","content":[{"type":"thinking","signature":"opaque","thinking":"reason"},
+                {"type":"tool_use","id":"call-2","name":"capture","input":{"image":image(400)}}]},
+            {"role":"user","content":[image(400),image(400)]}
+        ]});
+        let mut small = request.clone();
+        assert_eq!(request_size::prepare(&mut small).unwrap().omitted_images, 0);
+        assert_eq!(small, request);
+        let mut http = json!({"body":encode(request.to_string()),"operation_id":"operation",
+            "host_callback_id":"callback","headers":{"x-session-id":["session"],"x-assistant-message-id":["message"]}});
+        let envelope = http.clone();
+        let reduced = request_size::retry(&mut http).unwrap().unwrap();
+        assert_eq!(reduced.omitted_images, 1);
+        assert!(reduced.bytes.len() < reduced.original_bytes);
+        let final_request: Value = serde_json::from_slice(&decode(&http["body"]).unwrap()).unwrap();
+        let mut expected = request.clone();
+        expected["messages"][0]["content"][0]["content"][0] =
+            final_request["messages"][0]["content"][0]["content"][0].clone();
+        assert_eq!(final_request, expected);
+        assert_eq!(
+            final_request["messages"][0]["content"][0]["content"][0]["type"],
+            "text"
+        );
+        http["body"] = envelope["body"].clone();
+        assert_eq!(http, envelope);
+        http["body"] = json!(encode(&reduced.bytes));
+        assert!(request_size::retry(&mut http).unwrap().is_none());
+    }
+
+    #[test]
+    fn latest_images_and_large_text_are_not_silently_truncated() {
+        for mut request in [
+            json!({"messages":[{"role":"user","content":"大".repeat(1_400_000)}]}),
+            json!({"messages":[{"role":"user","content":[image(4_100_000)]}]}),
+        ] {
+            let original = request.clone();
+            let body = request_size::prepare(&mut request).unwrap();
+            assert!(body.bytes.len() > request_size::TARGET_BYTES);
+            assert_eq!(body.omitted_images, 0);
+            assert_eq!(request, original);
+            let mut http = json!({"body":encode(&body.bytes)});
+            assert!(request_size::retry(&mut http).unwrap().is_none());
+        }
+    }
 }

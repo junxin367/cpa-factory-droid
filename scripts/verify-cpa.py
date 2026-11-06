@@ -89,6 +89,9 @@ class Mock(BaseHTTPRequestHandler):
     error_status = 400
     retry_after = "7"
     inference_delay = 0
+    media_limit = None
+    media_observations = []
+    media_retry_delay = 0
 
     def log_message(self, *_):
         pass
@@ -97,6 +100,8 @@ class Mock(BaseHTTPRequestHandler):
         raw = value.encode() if isinstance(value, str) else json.dumps(value).encode()
         inference = self.path.endswith(("/messages", "/responses", "/chat/completions"))
         delay = Mock.inference_delay if inference else 0
+        if inference and 200 <= status < 300 and Mock.media_retry_delay:
+            delay = Mock.media_retry_delay
         heartbeats = delay if content_type == "text/event-stream" else 0
         heartbeat = b": waiting\n\n"
         if inference and 200 <= status < 300:
@@ -167,6 +172,15 @@ class Mock(BaseHTTPRequestHandler):
                 token.strip().lower() == "upgrade" for token in self.headers.get("Connection", "").split(",")
             ):
                 Mock.upgrade_calls += 1
+        if Mock.media_limit is not None:
+            with self.lock:
+                Mock.media_observations.append({"bytes": len(raw), "messages": data.get("messages"),
+                    "session": self.headers.get("x-session-id"),
+                    "message": self.headers.get("x-assistant-message-id"),
+                    "trace": self.headers.get("traceparent")})
+            if len(raw) > Mock.media_limit:
+                return self.reply('{"error": {"code": "413", "message": "Request Entity Too Large"}}',
+                    status=413, headers={"Server": "Vercel", "X-Vercel-Error": "FUNCTION_PAYLOAD_TOO_LARGE"})
         if Mock.error_mode:
             headers = {"Request-Id": "req_factory_diagnostic", "Retry-After": Mock.retry_after}
             if Mock.error_mode == "html":
@@ -270,6 +284,8 @@ def main():
     parser.add_argument("--report", type=Path)
     parser.add_argument("--observe", action="store_true", help="记录旧版本失败项，用于修复前对照")
     parser.add_argument("--registration-only", action="store_true", help="仅验证宿主版本、注册和菜单能力")
+    parser.add_argument("--replay-request", type=Path,
+        help="只向本机 Mock 回放原生 Messages JSON 或含 requestBody 的本机请求记录")
     args = parser.parse_args()
     library = args.library.resolve(strict=True)
     checks = []
@@ -729,6 +745,130 @@ console.log(JSON.stringify(checks));
         check("SDK betas 合并到能力头且不进入上游正文", feature_probe["betas"] is None)
         check("完整 Claude 功能请求可通过严格上游 SSE 校验",
             "message_stop" in call(protocol="anthropic", stream=True, **feature_request))
+
+        def image(size):
+            return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * size}}
+
+        def image_history(old_size, new_size):
+            return [
+                {"role": "user", "content": [image(old_size)]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "分析截图", "signature": "opaque-history-signature"},
+                    {"type": "tool_use", "id": "capture-1", "name": "capture", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "capture-1",
+                    "content": [{"type": "text", "text": "保留工具结果"}, image(new_size), image(new_size)]}]},
+            ]
+
+        try:
+            for stream in (False, True):
+                # 真实宿主负责 Payload 与流式生命周期，Mock 按实际收到的 UTF-8 字节拒绝超限请求。
+                Mock.media_limit, Mock.media_observations = 4_000_000, []
+                history = image_history(2_100_000, 1_000_000)
+                result = call(protocol="anthropic", stream=stream, messages=history)
+                observed = Mock.media_observations
+                check(f"历史图片超预算时预先缩减且 {'SSE' if stream else 'JSON'} 一次成功",
+                    len(observed) == 1 and observed[0]["bytes"] < 4_000_000
+                    and observed[0]["messages"][0]["content"][0]["type"] == "text"
+                    and observed[0]["messages"][1:] == history[1:]
+                    and ("message_stop" in result if stream else bool(result.get("session"))))
+
+                Mock.media_limit, Mock.media_observations = 9_000, []
+                history = image_history(12_000, 400)
+                result = call(protocol="anthropic", stream=stream, messages=history)
+                observed = Mock.media_observations
+                check(f"真实 413 触发 {'SSE' if stream else 'JSON'} 一次缩减重试并保留工具配对",
+                    len(observed) == 2 and observed[0]["bytes"] > 9_000 > observed[1]["bytes"]
+                    and observed[0]["messages"] == history
+                    and observed[1]["messages"][1:] == history[1:]
+                    and observed[1]["messages"][0]["content"][0]["type"] == "text"
+                    and all(observed[0][key] == observed[1][key] for key in ("session", "message", "trace"))
+                    and ("message_stop" in result if stream else bool(result.get("session"))))
+
+                for case, history, expected_calls in [
+                    ("持续拒绝", image_history(12_000, 400), 2),
+                    ("只有最新图片", [{"role": "user", "content": [image(12_000)]}], 1),
+                    ("纯文本", [{"role": "user", "content": "text" * 3_000}], 1),
+                ]:
+                    Mock.media_limit, Mock.media_observations = 1, []
+                    try:
+                        call(protocol="anthropic", stream=stream, messages=history)
+                    except CPARequestError as failure:
+                        message = (failure.body or {}).get("error", {}).get("message", "")
+                        valid = failure.status == 413 and message.startswith("Request Entity Too Large")
+                        valid &= "压缩会话" in message
+                    else:
+                        valid = False
+                    check(f"413 {'SSE' if stream else 'JSON'} {case}停止重试并给出处理提示",
+                        valid and len(Mock.media_observations) == expected_calls)
+                check("413 结束后释放宿主活动请求", bool(wait_until(lambda: status()["active_requests"] == 0)))
+
+                Mock.media_limit, Mock.media_observations, Mock.media_retry_delay = 9_000, [], 12
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+                connection.connect()
+                transport = connection.sock
+
+                def cancel_size_retry():
+                    try:
+                        connection.request("POST", "/v1/messages", body=json.dumps({
+                            "model": "factory/claude-opus-5-5", "max_tokens": 32, "stream": stream,
+                            "messages": image_history(12_000, 400)}).encode(),
+                            headers={"Authorization": "Bearer " + client, "Content-Type": "application/json"})
+                        connection.getresponse().read()
+                    except (OSError, http.client.HTTPException):
+                        pass
+
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        pending = pool.submit(cancel_size_retry)
+                        try:
+                            check("取消前 413 恢复已进入第二次 HTTP 调用",
+                                bool(wait_until(lambda: len(Mock.media_observations) == 2)))
+                        finally:
+                            transport.shutdown(socket.SHUT_RDWR)
+                            connection.close()
+                        pending.result(timeout=5)
+                    check(f"取消 413 {'SSE' if stream else 'JSON'} 重试后及时释放宿主操作",
+                        bool(wait_until(lambda: status()["active_requests"] == 0, timeout=5))
+                        and len(Mock.media_observations) == 2)
+                finally:
+                    Mock.media_retry_delay = 0
+
+            Mock.media_limit, Mock.media_observations = 1, []
+            for protocol in ("responses", "chat"):
+                before = len(Mock.media_observations)
+                try:
+                    call(protocol=protocol)
+                except CPARequestError as failure:
+                    valid = failure.status == 413
+                    valid &= (failure.body or {}).get("error", {}).get("message") == "Request Entity Too Large"
+                else:
+                    valid = False
+                check(f"{protocol} 不执行 Claude 图片缩减重试",
+                    valid and len(Mock.media_observations) == before + 1)
+        finally:
+            Mock.media_limit, Mock.media_observations = None, []
+            Mock.media_retry_delay = 0
+
+        if args.replay_request:
+            recorded = json.loads(args.replay_request.read_text(encoding="utf-8"))
+            replay = json.loads(recorded["requestBody"]) if isinstance(recorded.get("requestBody"), str) else recorded
+            assert isinstance(replay.get("messages"), list), "回放文件必须是原生 Messages 请求"
+            replay = {key: value for key, value in replay.items() if key not in ("model", "stream")}
+            try:
+                for stream in (False, True):
+                    Mock.media_limit, Mock.media_observations = 4_000_000, []
+                    try:
+                        result = call(protocol="anthropic", stream=stream, **replay)
+                        valid = "message_stop" in result if stream else bool(result.get("session"))
+                    except CPARequestError:
+                        valid = False
+                    observed = Mock.media_observations
+                    sent_bytes = observed[-1]["bytes"] if observed else 0
+                    check(f"本机历史请求 {'SSE' if stream else 'JSON'} 回放一次成功，发送 {sent_bytes} 字节",
+                        valid and len(observed) == 1 and 0 < sent_bytes <= 4_000_000)
+            finally:
+                Mock.media_limit, Mock.media_observations = None, []
+
         changed_turn = call(protocol="anthropic", messages=[
             {"role": "system", "content": [{"type": "text", "text": "New instruction"}]},
             {"role": "user", "content": "Continue", "output_config": {"effort": "high"}}])

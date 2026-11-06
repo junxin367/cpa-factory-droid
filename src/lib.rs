@@ -9,6 +9,7 @@ mod oauth;
 mod pricing;
 mod protocol;
 mod quota_window_usage;
+mod request_size;
 mod state;
 mod tokens;
 mod upstream;
@@ -741,14 +742,14 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
         .ok_or_else(|| Fault::new(400, "protocol_guard_missing", "缺少 Factory 请求封装状态"))?;
     let cb = data["host_callback_id"].as_str().unwrap_or("");
     // Inference follows the host request lifecycle, including client cancellation.
-    let op = rt.operation(cb, None)?;
+    let mut op = rt.operation(cb, None)?;
     if stream {
         data["stream_id"]
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| Fault::input("宿主流 ID 缺失"))?;
     }
-    let http = factory::llm_request(
+    let mut http = factory::llm_request(
         rt,
         &cred,
         &model,
@@ -758,36 +759,63 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
         &data["Metadata"],
         Some(identity),
     )?;
-    if !stream {
-        let response = rt.host.call("host.http.do", &http)?;
-        let code = response["StatusCode"].as_u64().unwrap_or(502) as u16;
-        if !(200..300).contains(&code) {
-            access::invalidate_upstream(rt, &cred, &model, code);
-            return Err(upstream::fault(
-                code,
-                &response["Headers"],
-                &upstream::body_prefix(&response["Body"], rt.error_body_limit() + 1),
-                rt.error_body_limit(),
-            ));
+    let mut retried = false;
+    let response = loop {
+        let response = rt.host.call(
+            if stream {
+                "host.http.do_stream"
+            } else {
+                "host.http.do"
+            },
+            &http,
+        )?;
+        let code = response[if stream { "status_code" } else { "StatusCode" }]
+            .as_u64()
+            .unwrap_or(502) as u16;
+        if (200..300).contains(&code) {
+            break response;
         }
+        let headers = &response[if stream { "headers" } else { "Headers" }];
+        let body = if stream {
+            // 重试前先读完并关闭失败流，继续服从宿主调用上下文的取消。
+            upstream::read_error_stream(
+                rt.host,
+                response["stream_id"].as_str().unwrap_or(""),
+                rt.error_body_limit(),
+            )
+        } else {
+            upstream::body_prefix(&response["Body"], rt.error_body_limit() + 1)
+        };
+        access::invalidate_upstream(rt, &cred, &model, code);
+        let error = upstream::fault(code, headers, &body, rt.error_body_limit());
+        if code == 413 && format == protocol::Format::Claude {
+            if !retried {
+                if let Some(reduced) = request_size::retry(&mut http)? {
+                    retried = true;
+                    // CPA 的 operation 只能被一次 HTTP 调用领取；重试仍绑定同一
+                    // host_callback_id，但必须新建操作，旧句柄由 Drop 释放。
+                    op = rt.operation(cb, None)?;
+                    http["operation_id"] = json!(op.id);
+                    rt.host.log(&format!(
+                        "Factory HTTP 413，省略 {} 张旧图片后重试一次：{} → {} 字节",
+                        reduced.omitted_images,
+                        reduced.original_bytes,
+                        reduced.bytes.len()
+                    ));
+                    continue;
+                }
+            }
+            return Err(request_size::with_hint(error));
+        }
+        return Err(error);
+    };
+    if !stream {
         let body = decode(&response["Body"])?;
         protocol::validate_response(&body, format)?;
         return Ok(json!({"Payload":encode(&body),
             "Headers":upstream::response_headers(&response["Headers"], false)}));
     }
-    let response = rt.host.call("host.http.do_stream", &http)?;
-    let code = response["status_code"].as_u64().unwrap_or(502) as u16;
     let upstream_stream = response["stream_id"].as_str().unwrap_or("").to_string();
-    if !(200..300).contains(&code) {
-        access::invalidate_upstream(rt, &cred, &model, code);
-        let body = upstream::read_error_stream(rt.host, &upstream_stream, rt.error_body_limit());
-        return Err(upstream::fault(
-            code,
-            &response["headers"],
-            &body,
-            rt.error_body_limit(),
-        ));
-    }
     if upstream_stream.is_empty() {
         return Err(Fault::new(
             502,

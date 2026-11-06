@@ -167,6 +167,32 @@ mod tests {
     }
 
     #[test]
+    fn final_size_error_keeps_original_diagnostics_and_adds_actionable_guidance() {
+        let original = json!({"error":{"code":"413","type":"request_too_large",
+            "message":"Request Entity Too Large","param":"body"},"request_id":"req_size"});
+        let error = crate::request_size::with_hint(fault(
+            413,
+            &json!({"Retry-After":["7"]}),
+            original.to_string().as_bytes(),
+            DEFAULT_BODY_LIMIT,
+        ));
+        assert_eq!(error.http_status, 413);
+        assert_eq!(error.retry_after_seconds, Some(7));
+        let forwarded: Value = serde_json::from_str(&guard::http_fault(error).message).unwrap();
+        assert!(forwarded["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Request Entity Too Large\n"));
+        assert!(forwarded["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("压缩会话"));
+        let mut expected = original;
+        expected["error"]["message"] = forwarded["error"]["message"].clone();
+        assert_eq!(forwarded, expected);
+    }
+
+    #[test]
     fn text_errors_and_empty_errors_keep_http_status_and_retry_metadata() {
         let error = fault(
             429,
