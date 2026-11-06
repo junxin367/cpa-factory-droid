@@ -276,6 +276,19 @@ class CPARequestError(RuntimeError):
         self.body = body
 
 
+def cancel_and_join_http_reader(connection, transport, pending):
+    # 取消测试只用 socket.shutdown 唤醒读取线程；等 read 完成后再关闭
+    # HTTPConnection，避免 Linux/macOS 的 HTTPResponse.fp 被两个线程并发关闭。
+    try:
+        try:
+            transport.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        pending.result(timeout=5)
+    finally:
+        connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library", required=True, type=Path)
@@ -616,9 +629,7 @@ console.log(JSON.stringify(checks));
                     try:
                         check("取消前请求进入执行状态", bool(wait_until(lambda: status()["active_requests"] == 1)))
                     finally:
-                        transport.shutdown(socket.SHUT_RDWR)
-                        connection.close()
-                    pending.result(timeout=5)
+                        cancel_and_join_http_reader(connection, transport, pending)
                 check(f"客户端取消{'流式' if stream else '非流式'}长请求后及时释放操作",
                     bool(wait_until(lambda: status()["active_requests"] == 0, timeout=5)))
         finally:
@@ -824,9 +835,7 @@ console.log(JSON.stringify(checks));
                             check("取消前 413 恢复已进入第二次 HTTP 调用",
                                 bool(wait_until(lambda: len(Mock.media_observations) == 2)))
                         finally:
-                            transport.shutdown(socket.SHUT_RDWR)
-                            connection.close()
-                        pending.result(timeout=5)
+                            cancel_and_join_http_reader(connection, transport, pending)
                     check(f"取消 413 {'SSE' if stream else 'JSON'} 重试后及时释放宿主操作",
                         bool(wait_until(lambda: status()["active_requests"] == 0, timeout=5))
                         and len(Mock.media_observations) == 2)
