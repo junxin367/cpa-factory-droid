@@ -4,7 +4,7 @@
 
 ## 使用方式
 
-1. 安装并启用插件，配置官方 Droid CLI 的原生可执行文件路径。
+1. 安装并启用插件，默认自动读取 Factory 官方模型页面；也可配置官方 Droid CLI。
 2. 在 CPA 的 **OAuth 登录** 页面选择 **Factory Droid**，打开官方授权链接完成登录。也可在插件页面输入 Factory API Key 添加凭证。
 3. 插件验证身份、读取目录，创建 CPA 认证文件，自动注册全部已支持且未被官方标记为禁用、废弃或自定义的模型。
 4. 后续在 CPA 的认证文件页管理账号、优先级和模型规则，并查看用量及刷新额度。
@@ -15,7 +15,9 @@
 ## 自动目录与请求边界
 
 已支持 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions 三类原生协议。Google、自动路由、自定义/BYOK 和未知原生协议不会被冒充可调用模型。
-未配置 Droid CLI 时使用内置目录；配置 CLI 后，添加和原生凭证刷新会同步官方目录。目录随 CPA 凭据保存，导入和重启不需要先打开插件页面。
+未配置 Droid CLI 时自动同步 Factory 官方模型页面，网络不可用时保留上次目录，首次使用可回退到内置快照。配置 CLI 后以官方 CLI 目录为准。目录随 CPA 凭据保存，导入和重启不需要先打开插件页面。
+
+正常目录每 24 小时由 CPA 自动刷新，失败后 5 分钟重试。在 Manager 打开或刷新模型页时，也会检查官方目录，同一目录检查间隔为 3 分钟。已禁用的模型保留在完整模型定义中，原生“已禁用”列表可显示禁用原因并恢复。
 
 目录表示支持的请求路由，并不保证某个账号拥有所有模型权限。实际权限、限流和上游错误由 Factory 返回，交给 CPA 记录和处理。OAuth 令牌由 CPA 调度插件自动续期；授权被撤销后需要重新登录。API Key 撤销或到期后需要更新，目录刷新不会生成新 Key。详见 [OAuth 登录](docs/oauth.md)。
 
@@ -51,7 +53,7 @@ CPA 官方管理端已支持通用插件额度。CPA-Manager-Plus v1.14.10 原�
 - 当前支持与验收基线为 CPA v8.0.52，C ABI 1 / RPC Schema 7，需要带 CGO 原生插件支持的构建。插件声明实际使用的最低协议版本，不要求宿主支持多提供商扩展。
 - Windows x64 需要 Microsoft Visual C++ v14 Redistributable；Linux x64 构建基线为 Ubuntu 22.04 / GLIBC 2.35；另提供 macOS Intel 和 Apple Silicon 原生动态库。
 - 可登录的 Factory 账号或 API Key（`fk-` 开头），以及可访问 Factory 的 CPA 出站网络；OAuth 还需要访问 `api.workos.com`。
-- 官方 Droid CLI 是独立依赖，不随插件分发。插件只用 CLI 查询模型目录，不以 CLI 执行推理。
+- 官方 Droid CLI 为可选的独立依赖，不随插件分发。配置后只用 CLI 查询模型目录，不以 CLI 执行推理。
 
 ## 安装
 
@@ -81,7 +83,7 @@ https://raw.githubusercontent.com/junxin367/cpa-factory-droid/main/registry.json
 
 `data-dir` 相对于 CPA 进程的工作目录，用于保存脱敏账号兼容状态和模型目录。API Key、OAuth access token 和 refresh token 由 CPA 的 auth 存储保存，不写入插件 YAML 或插件状态。
 
-要自动同步完整的官方模型目录，先按 [Factory 官方 CLI 文档](https://docs.factory.com/reference/cli-reference) 独立安装 Droid，取得原生可执行文件的绝对路径，再补充插件配置。例如下面的路径只是占位示例，须替换成自己的安装位置：
+如需改用官方 CLI 查询目录，先按 [Factory 官方 CLI 文档](https://docs.factory.com/reference/cli-reference) 独立安装 Droid，取得原生可执行文件的绝对路径，再补充插件配置。例如下面的路径只是占位示例，须替换成自己的安装位置：
 
 ```yaml
 plugins:
@@ -178,7 +180,7 @@ Content-Type: application/json
 
 旧插件账本和价格字段保留用于兼容读取，不自动删除或转换成 CPA 历史。卸载前可在 CPA 原生凭证页移除账号。一个插件数据目录只供一个 CPA 进程使用。
 
-版本变化见 [v0.1.12 发布说明](docs/releases/v0.1.12.md)，请求处理与模型能力验收见 [本机验证记录](docs/validation.md)，跨宿主支持范围见 [兼容性验证记录](docs/compatibility-validation.md)。
+版本变化见 [v0.1.13 发布说明](docs/releases/v0.1.13.md)，请求处理与模型能力验收见 [本机验证记录](docs/validation.md)，跨宿主支持范围见 [兼容性验证记录](docs/compatibility-validation.md)。
 
 ### CPA Manager Plus 原生额度
 
@@ -206,6 +208,7 @@ node --check web/app.js
 node --check web/manager-extension.js
 node --check web/manager-usage.js
 node --check web/manager-refresh.js
+node --check web/manager-models.js
 node --check web/manager-worker.js
 node --check web/manager-bootstrap.js
 node --check scripts/release.mjs

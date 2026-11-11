@@ -55,10 +55,12 @@ pub fn route(candidate: &Value) -> Option<(&'static str, &'static str, &'static 
             | "kimi-k3"
             | "qwen3.8-max"
             | "deepseek-v4.1-flash"
+            | "deepseek-v4.1-flash-1017"
             | "deepseek-v4-flash-0731"
             | "deepseek-v4-pro"
-            | "minimax-m3" => Some(("chat_completions", "fireworks", "core")),
-            "glm-5.2" | "glm-5.2-fast" | "nemotron-3-ultra" => {
+            | "minimax-m3"
+            | "minimax-m3.1-flash" => Some(("chat_completions", "fireworks", "core")),
+            "glm-5.2" | "glm-5.2-fast" | "nemotron-3-ultra" | "nemotron-3.5-super" | "beam-1.0" => {
                 Some(("chat_completions", "baseten", "core"))
             }
             "mistral-large-4" | "mistral-medium-3.5" => {

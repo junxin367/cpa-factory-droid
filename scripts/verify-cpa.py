@@ -92,6 +92,11 @@ class Mock(BaseHTTPRequestHandler):
     media_limit = None
     media_observations = []
     media_retry_delay = 0
+    catalog_calls = 0
+    catalog_authorization_seen = False
+    catalog_status = 200
+    catalog_extra = []
+    catalog_duplicate = False
 
     def log_message(self, *_):
         pass
@@ -131,6 +136,28 @@ class Mock(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if self.path == "/models.md":
+            with self.lock:
+                Mock.catalog_calls += 1
+                Mock.catalog_authorization_seen |= bool(self.headers.get("Authorization"))
+            snapshot = json.loads((ROOT / "src/factory-model-catalog.json").read_text(encoding="utf-8"))
+            candidates = snapshot["candidates"] + Mock.catalog_extra
+            if Mock.catalog_duplicate:
+                candidates = candidates + [candidates[0]]
+            lines = ["# Available Models", ""]
+            for provider, heading in [("anthropic", "Anthropic"), ("openai", "OpenAI"),
+                                      ("google", "Google"), ("xai", "xAI"),
+                                      ("factory", "Droid Core (Open Models)")]:
+                lines += ["## " + heading, "", "| Model | Model ID | Multiplier | Reasoning |",
+                          "| --- | --- | --- | --- |"]
+                for row in candidates:
+                    if row["modelProvider"] != provider:
+                        continue
+                    suffix = "<sup>‡</sup>" if row.get("deprecated") else ""
+                    lines.append(f'| {row["displayName"]}{suffix} | `{row["id"]}` | '
+                                 f'{row["tokenMultiplier"]}× | `high` |')
+                lines.append("")
+            return self.reply("\n".join(lines), "text/markdown", Mock.catalog_status)
         if self.path == "/api/billing/limits":
             observed = int(time.time() * 1000)
             window = lambda used, duration: {"usedPercent": used,
@@ -471,6 +498,51 @@ routing:
         added = request("/v0/management/plugins/factory-droid/accounts",
             {"label": "本机模拟凭证", "api_key": "fk-local-integration-only", "enabled": True})
         check("原生凭据创建并发布模型", added["ok"] and "factory/gpt-5.4" in models())
+        auth_file = next((profile / "auth").glob("*.json"))
+        initial_catalog = models()
+        definitions_path = "/v0/management/plugins/factory-droid/model-definitions"
+        definitions = request(definitions_path)
+        check("无 CLI 配置时从官方格式目录自动发布多族模型",
+              len(initial_catalog) > 13 and {"factory/claude-fable-5.2",
+              "factory/gpt-6.1-terra", "factory/nemotron-3.5-super"} <= set(initial_catalog))
+        check("共享目录只查询一次且不携带 Factory 令牌",
+              Mock.catalog_calls == 1 and not Mock.catalog_authorization_seen)
+        check("过滤前模型定义与原生发布集合对应",
+              definitions["channel"] == "factory-droid"
+              and set(initial_catalog) <= {row["id"] for row in definitions["models"]})
+        excluded = initial_catalog[:10]
+        update_auth(auth_file, excluded_models=excluded)
+        check("禁用 10 个模型后原生路由排除生效",
+              bool(wait_until(lambda: models() == [name for name in initial_catalog if name not in excluded])))
+        check("完整定义保留全部已禁用模型",
+              set(excluded) <= {row["id"] for row in request(definitions_path)["models"]})
+        update_auth(auth_file, excluded_models=[])
+        assert wait_until(lambda: models() == initial_catalog)
+        Mock.catalog_extra = [{"id": "fixture-public-future", "displayName": "Future public model",
+                               "modelProvider": "openai", "tokenMultiplier": 1}]
+        request("/v0/management/plugins/factory-droid/accounts/refresh", {"id": added["data"]["id"]})
+        check("上游新增模型刷新后自动发布",
+              bool(wait_until(lambda: "factory/fixture-public-future" in models())))
+        before_failure = models()
+        Mock.catalog_status = 503
+        request("/v0/management/plugins/factory-droid/accounts/refresh", {"id": added["data"]["id"]})
+        check("目录故障保留原快照并明确标记过期",
+              models() == before_failure
+              and json.loads(auth_file.read_text(encoding="utf-8"))["factory_catalog_stale"] is True)
+        Mock.catalog_status = 200
+        Mock.catalog_duplicate = True
+        request("/v0/management/plugins/factory-droid/accounts/refresh", {"id": added["data"]["id"]})
+        check("重复模型目录不能替换成功快照",
+              models() == before_failure
+              and json.loads(auth_file.read_text(encoding="utf-8"))["factory_catalog_stale"] is True)
+        Mock.catalog_extra, Mock.catalog_duplicate = [], False
+        request("/v0/management/plugins/factory-droid/accounts/refresh", {"id": added["data"]["id"]})
+        assert wait_until(lambda: models() == initial_catalog)
+        check("目录恢复后清除过期标记且未执行推理",
+              json.loads(auth_file.read_text(encoding="utf-8"))["factory_catalog_stale"] is False
+              and Mock.inference_calls == 0)
+        models_module = request("/v0/resource/plugins/factory-droid/manager-models.js", stream=True)
+        check("原生模型定义适配资源已内嵌", "installModelDefinitionsBridge" in models_module)
         quota_auth = next(file for file in request("/v0/management/auth-files")["files"]
                           if file.get("provider", file.get("type")) == "factory-droid")
         quota = request("/v0/management/plugins/factory-droid/quota", {"auth_index": quota_auth["auth_index"]})
@@ -513,8 +585,47 @@ const root = new URL(process.argv[1]);
 const load = async (path) => import('data:text/javascript;base64,' + readFileSync(new URL(path, root)).toString('base64'));
 const { canRefreshOnEntry, isExpiredWindow, nextCycleRefreshAt, nextCycleWakeAt, relativeReset, restoreRefreshSnapshot } = await load('web/manager-refresh.js');
 const { normalizeQuota, buildTargets } = await load('web/manager-usage.js');
+const { factoryDefinitionsURL, installModelDefinitionsBridge } = await load('web/manager-models.js');
 const checks = [];
 const check = (name, fn) => { fn(); checks.push(name); };
+const definitionPath = '/v0/management/model-definitions/factory-droid';
+const definitionTarget = 'http://127.0.0.1:18317/v0/management/plugins/factory-droid/model-definitions';
+check('仅重定向同源 Factory 模型定义', () => {
+  assert.equal(factoryDefinitionsURL(definitionPath, 'http://127.0.0.1:18317/management.html'), definitionTarget);
+  for (const value of ['/v1/models', '/v0/management/model-definitions/devin',
+      'https://other.invalid' + definitionPath]) {
+    assert.equal(factoryDefinitionsURL(value, 'http://127.0.0.1:18317/management.html'), null);
+  }
+});
+const definitionCalls = [];
+class DefinitionXHR { open(...args) { definitionCalls.push(args); } }
+const definitionFetch = (...args) => { definitionCalls.push(args); return Promise.resolve({ok:true}); };
+const definitionWindow = {location:{href:'http://127.0.0.1:18317/management.html'},
+  fetch:definitionFetch, XMLHttpRequest:DefinitionXHR};
+const definitionOpen = DefinitionXHR.prototype.open;
+const definitionBridge = installModelDefinitionsBridge(definitionWindow);
+const definitionInit = {headers:{Authorization:'Bearer fixture-management'}, credentials:'omit'};
+await definitionWindow.fetch(definitionPath, definitionInit);
+check('模型定义 fetch 保留管理鉴权与请求配置', () => {
+  assert.equal(definitionCalls.at(-1)[0], definitionTarget);
+  assert.equal(definitionCalls.at(-1)[1], definitionInit);
+});
+await definitionWindow.fetch(new Request('http://127.0.0.1:18317' + definitionPath,
+  {headers:definitionInit.headers}));
+check('模型定义 Request 保留管理鉴权', () =>
+  assert.equal(definitionCalls.at(-1)[0].headers.get('Authorization'), definitionInit.headers.Authorization));
+await definitionWindow.fetch(definitionPath, {method:'POST'});
+check('模型定义适配不重定向写请求', () => assert.equal(definitionCalls.at(-1)[0], definitionPath));
+new DefinitionXHR().open('GET', definitionPath, true);
+check('原生 Manager XHR 查询完整模型定义', () => {
+  assert.equal(definitionCalls.at(-1)[1], definitionTarget);
+  assert.equal(definitionCalls.at(-1)[2], true);
+});
+definitionBridge.stop();
+check('模型定义适配可恢复原生网络函数', () => {
+  assert.equal(definitionWindow.fetch, definitionFetch);
+  assert.equal(DefinitionXHR.prototype.open, definitionOpen);
+});
 const now = Date.UTC(2026, 10, 4, 9);
 const ended = now - 1000, future = now + 7 * 86400000;
 const value = { attemptAt: now - 181000, windows: [{reset: ended}, {reset: future}] };
@@ -1041,6 +1152,10 @@ console.log(JSON.stringify(checks));
 
         update_auth(auth_file, prefix="team", excluded_models=["factory/glm-5.3"],
             model_aliases=[{"name": "factory/gpt-5.4", "alias": "friendly-gpt"}])
+        # Generic field PATCH and filesystem notifications can leave the host's
+        # alias attributes out of sync. Verify persisted native rules after reload.
+        stop()
+        start()
         expected = sorted("team/" + ("friendly-gpt" if name == "factory/gpt-5.4" else name)
             for name in original_models if name != "factory/glm-5.3")
         check("CPA 原生排除、别名和前缀生效", bool(wait_until(lambda: models() == expected)))

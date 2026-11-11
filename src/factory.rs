@@ -75,13 +75,20 @@ pub fn parse_auth(data: &Value) -> Result<Value> {
     Ok(json!({"Handled":true,"Auth":auth}))
 }
 pub fn auth_data(cred: &Value, id: &str, file: &str) -> Value {
+    let catalog_interval = if cred["factory_catalog_stale"] == true {
+        300
+    } else {
+        86400
+    };
     let next_refresh = if oauth::is_oauth(cred) {
         oauth::refresh_at(cred)
     } else {
         cred["factory_catalog_checked_at"]
             .as_str()
             .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
-            .map(|time| time.with_timezone(&chrono::Utc) + chrono::Duration::hours(24))
+            .map(|time| {
+                time.with_timezone(&chrono::Utc) + chrono::Duration::seconds(catalog_interval)
+            })
             .unwrap_or_else(chrono::Utc::now)
     };
     let mut data = json!({"Provider":PROVIDER,"ID":id,"FileName":file,
@@ -104,7 +111,7 @@ pub fn auth_data(cred: &Value, id: &str, file: &str) -> Value {
     } else {
         // NextRefreshAfter is only a lower bound in CPA. Unknown plugin
         // providers also need an interval to enter the host refresh scheduler.
-        data["Metadata"]["refresh_interval_seconds"] = json!(86400);
+        data["Metadata"]["refresh_interval_seconds"] = json!(catalog_interval);
         data["Metadata"]["last_refresh"] = cred["factory_catalog_checked_at"].clone();
     }
     data
@@ -767,13 +774,15 @@ pub fn refresh_auth(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
         .map(|a| a.auth_file.clone())
         .filter(|name| valid_auth_filename(name))
         .ok_or_else(|| Fault::input("Factory凭据文件名无效"))?;
-    crate::access::refresh_catalog(rt, &mut cred)?;
+    crate::access::refresh_catalog(
+        rt,
+        &mut cred,
+        data["host_callback_id"].as_str().unwrap_or(""),
+    )?;
     upsert_account_version(rt, &cred, &name, true, Some(revision))?;
     crate::access::restore_catalog(rt, &cred)?;
-    Ok(
-        json!({"Auth":auth_data(&cred,data["AuthID"].as_str().unwrap_or(&name),&name),
-        "NextRefreshAfter":(chrono::Utc::now()+chrono::Duration::hours(24)).to_rfc3339()}),
-    )
+    let auth = auth_data(&cred, data["AuthID"].as_str().unwrap_or(&name), &name);
+    Ok(json!({"NextRefreshAfter":auth["NextRefreshAfter"],"Auth":auth}))
 }
 pub fn new_credential(key: &str, label: &str, enabled: bool) -> Value {
     json!({"type":PROVIDER,"account_id":format!("factory-{}",Uuid::new_v4()),"api_key":key,

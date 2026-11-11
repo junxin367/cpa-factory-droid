@@ -538,7 +538,7 @@ pub fn poll(rt: &Arc<Runtime>, data: &Value) -> Result<Value> {
             return Ok(login_error(&error.message));
         }
     };
-    if access::refresh_catalog(rt, cred).is_err() {
+    if access::refresh_catalog(rt, cred, callback).is_err() {
         rt.host
             .log("Factory OAuth 已授权，官方目录暂不可用；使用内置目录并等待后续刷新");
         cred["factory_catalog_source"] = json!("bundled_registry");
@@ -706,13 +706,17 @@ pub fn refresh(rt: &Arc<Runtime>, data: &Value, mut cred: Value) -> Result<Value
         rt.host.log("Factory 令牌已续期，身份信息等待重试");
         retry_identity = true;
     }
-    let catalog_due = cred["factory_catalog_checked_at"]
-        .as_str()
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .is_none_or(|checked| {
-            Utc::now() - checked.with_timezone(&Utc) >= ChronoDuration::hours(24)
-        });
-    if catalog_due && access::refresh_catalog(rt, &mut cred).is_err() {
+    let catalog_due = if rt.config.droid_cli_path.is_none() {
+        crate::public_catalog::refresh_due(&cred)
+    } else {
+        cred["factory_catalog_checked_at"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_none_or(|checked| {
+                Utc::now() - checked.with_timezone(&Utc) >= ChronoDuration::hours(24)
+            })
+    };
+    if catalog_due && access::refresh_catalog(rt, &mut cred, callback).is_err() {
         rt.host
             .log("Factory 官方目录刷新暂不可用，保留已有模型目录");
     }

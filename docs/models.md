@@ -1,6 +1,6 @@
 # 原生凭证与自动模型目录
 
-通过 CPA OAuth 登录或添加 Factory Key 后，插件执行身份查询和官方 Droid CLI `droid.list_models`，创建 CPA 凭据并自动注册支持的官方路由。OAuth 模式读取无会话目录，不把令牌传给 CLI。目录同步不执行推理，不再提供手工添加模型、账号模型别名、逐模型允许或付费验证流程。
+通过 CPA OAuth 登录或添加 Factory Key 后，插件查询身份并同步官方模型目录，创建 CPA 凭据并自动注册支持的官方路由。默认目录来源为 `https://docs.factory.com/models.md`，不携带账号令牌。显式配置 Droid CLI 后使用 `droid.list_models`；OAuth 模式读取无会话目录，不把令牌传给 CLI。目录同步不执行推理，不再提供手工添加模型、账号模型别名、逐模型允许或付费验证流程。
 
 ## 注册规则
 
@@ -12,7 +12,9 @@
 
 ## 模型能力数据
 
-动态目录提供的 `maxInputTokens`、`maxOutputTokens`、`contextLimits` 与 `noImageSupport` 优先生效；缺少这些字段时，使用 `src/factory-model-capabilities.json` 中从官方 Droid CLI 1.2.0 注册表提取的能力快照。快照记录 CLI 文件 SHA256 和核验日期，当前包含 90 个模型的输入预算、输出预算与图片能力，覆盖本机现有 53 个模型。输入预算采用 CLI 的 `maxInputTokens`；存在思考档位函数时记录关闭思考的输入预算，不将 CLI 的压缩阈值冒充模型上下文窗口。
+动态目录提供的 `maxInputTokens`、`maxOutputTokens`、`contextLimits` 与 `noImageSupport` 优先生效；缺少这些字段时，使用 `src/factory-model-capabilities.json` 中从官方 Droid CLI 1.2.0 注册表提取的能力快照。快照记录 CLI 文件 SHA256 和核验日期，包含 90 个模型的输入预算、输出预算与图片能力。输入预算采用 CLI 的 `maxInputTokens`；存在思考档位函数时记录关闭思考的输入预算，不将 CLI 的压缩阈值冒充模型上下文窗口。
+
+`src/factory-model-catalog.json` 单独保存 2026-11-11 官方页面的 74 个候选，用于离线首次接入和升级补齐定义。候选数量不等于可调用模型数量：Google 原生协议、未知 Factory 托管路由和已废弃候选仍按注册规则过滤。新 Anthropic、OpenAI 和 xAI 模型可随页面同步自动注册，未知上下文或图片能力保持未知；Factory 托管的开源模型须有已核实的实际推理提供商和协议。
 
 未匹配到可信能力数据的新模型不再默认声明 8192 输出 tokens，也不向宿主发布猜测的输入、输出或图片能力。只有 `supports_images=false` 时才在访问上游前拒绝图片；未知图片能力的模型允许原样发送图片，由上游判断。模型能力元数据不用于插件本地截断消息或输出，最终请求参数仍由调用者与 CPA payload 配置决定。
 
@@ -22,8 +24,8 @@
 
 新凭据包含 `factory_catalog`：目录版本、脱敏候选元数据和读取时间，不额外复制 Key 到插件状态。
 CPA 的 `model.for_auth` 钩子加载目录并同步凭据启停状态；导入、禁用、启用和重启不依赖插件页面轮询。
-`auth.refresh` 会重新确认身份并刷新目录。未配置 CLI 时使用内置目录；CLI 配置错误或返回无效目录会明确报错，不生成空目录冒充成功。
-API Key 凭据向 CPA 同时提供 24 小时刷新间隔、上次目录检查时间和下次检查时间；到期后由宿主调度刷新。OAuth 保持按令牌到期时间提前续期。刷新先于首次模型加载时，也能恢复必要的账号缓存。
+`auth.refresh` 会重新确认身份并刷新目录。未配置 CLI 时通过宿主 HTTP 客户端同步官方页面，所有凭据共用成功目录缓存；失败保留上次目录并设置 `factory_catalog_stale`，首次无缓存时才用内置快照。非模型页面、重复 ID、非法字段或缺少主要提供商的目录不作为同步成功。CLI 配置错误或返回无效目录会明确报错，不生成空目录冒充成功。
+API Key 凭据向 CPA 同时提供 24 小时刷新间隔、上次目录检查时间和下次检查时间；目录失败时改为 5 分钟重试。OAuth 保持按令牌到期时间提前续期。旧凭据首次模型加载时自动补充公共目录，刷新先于首次模型加载时也能恢复必要的账号缓存。
 旧凭据的插件目录缓存会在升级时恢复，下一次凭据刷新后写入 CPA 文件。
 
 插件记录 `model.for_auth` 实际接收的目录与版本，再读取 CPA 的最终发布集合。未配置宿主模型规则时要求完整集合一致；配置了排除、别名或前缀时，最终名称由 CPA 决定，不再与原始名称做简单相等比较。缺少凭据记录、目录未交付或未配置过滤却丢失模型仍视为未同步；空发布集合需要全部模型已被排除或原目录为空。
@@ -35,6 +37,8 @@ ABI 10 的全局别名摘要没有 `fork` 等完整规则字段，因此插件�
 页面仅提供 CPA OAuth 登录入口、管理授权、名称、Factory API Key、添加凭证和跳转原生凭证管理。
 账号卡片、详情、模型规则和统计在 CPA 原生管理端操作。
 
+Manager 的模型页需要过滤前的完整定义才能计算“已禁用”列表。插件增强模块仅把 Factory 的 `/model-definitions/factory-droid` 元数据查询转到插件自己的 `/model-definitions`，保留原请求的管理端鉴权；可用模型仍由 CPA 原生凭据路由返回。打开或刷新模型页时，公共目录最多每 3 分钟重新查询一次，并同步已有启用凭据的目录。禁用规则、别名、前缀和启停状态继续由 CPA 管理。此适配与额度增强一起加载，首次可从插件页激活，已开启自动加载时随 Manager 加载。
+
 ## 当前管理 API
 
 | 方法 | 路径后缀 | 用途 |
@@ -43,6 +47,7 @@ ABI 10 的全局别名摘要没有 `fork` 等完整规则字段，因此插件�
 | GET | `/accounts` | 脱敏的凭据接入状态 |
 | POST | `/accounts` | 验证身份、自动同步目录并创建凭据 |
 | POST | `/accounts/refresh` | 同步已有凭据的身份和目录 |
+| GET | `/model-definitions` | 同步并返回过滤前的模型定义，供原生禁用列表使用 |
 | POST | `/models/reconcile` | 重试 CPA 目录发布同步，不发送推理 |
 
 前缀为 `/v0/management/plugins/factory-droid`。额度接口由 CPA 宿主提供：`POST /v0/management/plugins/factory-droid/quota`，请求体为 `{"auth_index":"..."}`。

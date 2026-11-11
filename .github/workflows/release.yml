@@ -103,6 +103,7 @@ jobs:
           node --check web/manager-extension.js
           node --check web/manager-usage.js
           node --check web/manager-refresh.js
+          node --check web/manager-models.js
           node --check web/manager-worker.js
           node --check web/manager-bootstrap.js
       - name: 构建与打包

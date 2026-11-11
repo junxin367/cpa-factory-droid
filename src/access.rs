@@ -549,11 +549,9 @@ pub fn cancel_discovery(rt: &Runtime, id: &str) {
 }
 
 /// Fetch metadata only. Calling a model remains CPA's normal request path.
-pub fn refresh_catalog(rt: &Arc<Runtime>, cred: &mut Value) -> Result<()> {
+pub fn refresh_catalog(rt: &Arc<Runtime>, cred: &mut Value, callback: &str) -> Result<()> {
     let Some(executable) = rt.config.droid_cli_path.clone() else {
-        cred["factory_catalog_source"] = json!("bundled_registry");
-        cred["factory_catalog_checked_at"] = json!(now());
-        return Ok(());
+        return crate::public_catalog::refresh(rt, cred, callback);
     };
     let id = cred["account_id"].as_str().ok_or_else(Fault::internal)?;
     let run = DiscoveryRun::begin(rt, id)?;
@@ -607,11 +605,12 @@ pub fn refresh_catalog(rt: &Arc<Runtime>, cred: &mut Value) -> Result<()> {
         ));
     }
     cred["factory_catalog"] = json!({
-        "version":1, "candidates":candidates, "fetched_at":now(),
+        "version":1, "source":"official_droid_cli", "candidates":candidates, "fetched_at":now(),
         "cli_version":snapshot.cli_version, "protocol_version":snapshot.protocol_version
     });
     cred["factory_catalog_source"] = json!("official_droid_cli");
     cred["factory_catalog_checked_at"] = json!(now());
+    cred["factory_catalog_stale"] = json!(false);
     Ok(())
 }
 
@@ -636,19 +635,27 @@ pub fn restore_catalog(rt: &Runtime, cred: &Value) -> Result<()> {
     if account.discovery.fetched_at == fetched_at
         && account.discovery.candidates == rows
         && account.discovery.credential_fingerprint == credential_fingerprint(cred)
+        && account.discovery.stale == (cred["factory_catalog_stale"] == true)
     {
         return Ok(());
     }
     account.discovery = DiscoveryState {
         status: "catalog".into(),
-        source: "official_droid_cli".into(),
+        source: cred["factory_catalog_source"]
+            .as_str()
+            .unwrap_or("official_droid_cli")
+            .into(),
         fetched_at,
-        stale: false,
+        stale: cred["factory_catalog_stale"] == true,
         cli_version: catalog["cli_version"].as_str().map(str::to_owned),
         protocol_version: catalog["protocol_version"].as_str().map(str::to_owned),
         candidates: rows,
         credential_fingerprint: credential_fingerprint(cred),
-        message: String::new(),
+        message: if cred["factory_catalog_stale"] == true {
+            "官方目录同步失败，当前使用上次成功目录或内置快照".into()
+        } else {
+            String::new()
+        },
         ..DiscoveryState::default()
     };
     store.persist()

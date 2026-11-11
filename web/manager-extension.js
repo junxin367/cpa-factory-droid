@@ -1,4 +1,5 @@
 import { normalizeQuota, buildTargets, mergeUsage, actual, forecast } from "./manager-usage.js";
+import "./manager-models.js";
 import { ENTRY_REFRESH_INTERVAL, canRefreshOnEntry, isExpiredWindow, nextCycleRefreshAt, nextCycleWakeAt, relativeReset, restoreRefreshSnapshot, serializeRefreshSnapshot } from "./manager-refresh.js";
 (() => {
   // Run in the parent's realm: the plugin iframe is destroyed on route changes.

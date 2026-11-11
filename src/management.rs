@@ -199,13 +199,15 @@ pub fn registration(data: &Value) -> Value {
         ("GET","status"),("GET","accounts"),("POST","accounts"),
         ("POST","accounts/refresh"),
         ("POST","accounts/quota-windows"),
+        ("GET","model-definitions"),
         ("POST","models/reconcile"),
     ].into_iter().map(|(method,path)|json!({"Method":method,"Path":format!("{base}/plugins/{PROVIDER}/{path}")})).collect();
     json!({"routes":routes,"resources":[
         {"Path":"/index.html","Menu":"Factory Droid","Description":"添加 Factory 凭据并自动同步模型"},
         {"Path":"/app.js"},{"Path":"/style.css"},
         {"Path":"/manager-extension.js"},{"Path":"/manager-extension.css"},{"Path":"/manager-usage.js"},
-        {"Path":"/manager-worker.js"},{"Path":"/manager-bootstrap.js"},{"Path":"/manager-refresh.js"}
+        {"Path":"/manager-worker.js"},{"Path":"/manager-bootstrap.js"},{"Path":"/manager-refresh.js"},
+        {"Path":"/manager-models.js"}
     ]})
 }
 fn response(status: u16, content_type: &str, body: impl AsRef<[u8]>) -> Value {
@@ -259,6 +261,11 @@ pub fn handle(rt: &Arc<Runtime>, req: &Value) -> Value {
                 "text/javascript; charset=utf-8",
                 include_bytes!("../web/manager-refresh.js"),
             ),
+            "/manager-models.js" => response(
+                200,
+                "text/javascript; charset=utf-8",
+                include_bytes!("../web/manager-models.js"),
+            ),
             "/manager-worker.js" => {
                 let mut result = response(
                     200,
@@ -277,7 +284,11 @@ pub fn handle(rt: &Arc<Runtime>, req: &Value) -> Value {
         Ok(data) => response(
             200,
             "application/json; charset=utf-8",
-            json!({"ok":true,"data":data}).to_string(),
+            if path == format!("{PREFIX}/model-definitions") {
+                data.to_string()
+            } else {
+                json!({"ok":true,"data":data}).to_string()
+            },
         ),
         Err(error) => {
             let mut value=response(error.http_status,"application/json; charset=utf-8",
@@ -306,6 +317,60 @@ fn required<'a>(data: &'a Value, key: &str) -> Result<&'a str> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Fault::input(&format!("缺少字段 {key}")))
 }
+
+fn refresh_model_definitions(rt: &Arc<Runtime>, callback: &str) -> Result<()> {
+    if rt.config.droid_cli_path.is_some() {
+        return Ok(());
+    }
+    let _mutation = rt.management_lock.lock().map_err(|_| Fault::internal())?;
+    // Opening or refreshing the native Models tab checks shared metadata at most
+    // once every three minutes. Credential rules remain owned by CPA.
+    let files = factory::host_accounts(rt)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    crate::public_catalog::invalidate(rt, 180)?;
+    // Finish network I/O before reading credentials that may be rotated or
+    // edited concurrently. Per-credential updates only copy cached metadata.
+    crate::public_catalog::refresh(rt, &mut json!({}), callback)?;
+    let mut changed = false;
+    for file in files {
+        let Some(index) = file["auth_index"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let name = file["name"].as_str().unwrap_or("");
+        if !factory::valid_auth_filename(name) {
+            continue;
+        }
+        let current = rt
+            .host
+            .call("host.auth.get", &json!({"auth_index":index}))?;
+        let mut cred = current["json"].clone();
+        if cred["type"].as_str() != Some(PROVIDER)
+            || !cred["account_id"].as_str().is_some_and(factory::valid_id)
+            || cred["disabled"] == true
+            || cred["deleted"] == true
+        {
+            continue;
+        }
+        let previous = cred.clone();
+        crate::public_catalog::apply_cached(rt, &mut cred)?;
+        if cred != previous {
+            if rt.closing.load(Ordering::Acquire) {
+                return Err(Fault::new(503, "plugin_stopping", "插件正在停止"));
+            }
+            factory::save_account(rt, &cred, name)?;
+            factory::upsert_account(rt, &cred, name, false)?;
+            access::restore_catalog(rt, &cred)?;
+            changed = true;
+        }
+    }
+    if changed {
+        reconcile(rt)?;
+    }
+    Ok(())
+}
+
 pub fn sync_accounts(rt: &Runtime) -> Result<()> {
     let files = factory::host_accounts(rt)?;
     for file in &files {
@@ -654,7 +719,7 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
     };
     let callback = req["host_callback_id"].as_str().unwrap_or("");
     let data = body(req)?;
-    let _active = if method != "GET" {
+    let _active = if method != "GET" || path == "/model-definitions" {
         Some(rt.begin()?)
     } else {
         None
@@ -719,7 +784,7 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
             let mut cred =
                 factory::new_credential(key, label, data["enabled"].as_bool().unwrap_or(true));
             factory::whoami(rt, &mut cred, callback)?;
-            access::refresh_catalog(rt, &mut cred)?;
+            access::refresh_catalog(rt, &mut cred, callback)?;
             let id = cred["account_id"].as_str().unwrap_or("").to_string();
             let name = format!("factory-droid-{id}.json");
             factory::save_account(rt, &cred, &name)?;
@@ -849,7 +914,10 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
                 let _ = reconcile(rt);
                 return Err(error);
             }
-            access::refresh_catalog(rt, &mut cred)?;
+            if rt.config.droid_cli_path.is_none() {
+                crate::public_catalog::invalidate(rt, 0)?;
+            }
+            access::refresh_catalog(rt, &mut cred, callback)?;
             factory::save_account(rt, &cred, &name)?;
             factory::upsert_account(rt, &cred, &name, true)?;
             access::restore_catalog(rt, &cred)?;
@@ -934,6 +1002,23 @@ fn action(rt: &Arc<Runtime>, req: &Value) -> Result<Value> {
                 reconcile(rt)?;
             }
             Ok(serde_json::to_value(settings).map_err(|_| Fault::internal())?)
+        }
+        ("GET", "/model-definitions") => {
+            refresh_model_definitions(rt, callback)?;
+            let store = rt.lock()?;
+            let models: Vec<_> = store
+                .settings
+                .models
+                .iter()
+                .filter(|model| model.id == format!("factory/{}", model.upstream_id))
+                .map(|model| {
+                    json!({
+                        "id":model.id, "display_name":model.display_name,
+                        "type":PROVIDER, "owned_by":"factory"
+                    })
+                })
+                .collect();
+            Ok(json!({"channel":PROVIDER,"models":models}))
         }
         ("GET", "/models") => {
             sync_accounts(rt)?;

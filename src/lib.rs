@@ -8,6 +8,7 @@ mod management;
 mod oauth;
 mod pricing;
 mod protocol;
+mod public_catalog;
 mod quota_window_usage;
 mod request_size;
 mod state;
@@ -114,6 +115,7 @@ pub struct Runtime {
     management_lock: Mutex<()>,
     drafts: Mutex<BTreeMap<String, access::Draft>>,
     discovery_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    public_catalog: Mutex<public_catalog::Cache>,
     lifecycle_lock: Mutex<()>,
     stop_lock: Mutex<()>,
     oauth_sessions: oauth::Sessions,
@@ -173,6 +175,7 @@ impl Runtime {
         let store = Store::open(dir)?;
         {
             let mut state = store.lock().map_err(|_| Fault::internal())?;
+            access::register_discovered_models(&mut state, &public_catalog::bundled_candidates())?;
             let fingerprint =
                 access::fingerprint(&json!({"api_base":api,"local_mock":config.allow_local_mock}));
             if state.network_fingerprint != fingerprint {
@@ -218,6 +221,7 @@ impl Runtime {
             management_lock: Mutex::new(()),
             drafts: Mutex::new(BTreeMap::new()),
             discovery_cancels: Mutex::new(HashMap::new()),
+            public_catalog: Mutex::new(public_catalog::Cache::default()),
             lifecycle_lock: Mutex::new(()),
             stop_lock: Mutex::new(()),
             oauth_sessions: Mutex::new(HashMap::new()),
@@ -487,7 +491,7 @@ fn register() -> Value {
         "ConfigFields":[
             {"Name":"data-dir","Type":"string","Description":"脱敏状态与模型目录缓存，默认 data/factory-droid"},
             {"Name":"factory-client-version","Type":"string","Description":"Factory CLI 协议版本，默认 1.2.0；升级前核对官方请求"},
-            {"Name":"droid-cli-path","Type":"string","Description":"自动同步官方目录的 Droid 原生可执行文件绝对路径；不配置时使用内置目录"},
+            {"Name":"droid-cli-path","Type":"string","Description":"可选：官方 Droid 原生可执行文件绝对路径；不配置时自动同步 Factory 官方模型页面"},
             {"Name":"discovery-timeout-seconds","Type":"number","Description":"候选发现超时，默认30秒，范围10至120"},
             {"Name":"upstream-error-body-limit-bytes","Type":"number","Description":"上游错误正文读取上限，默认1048576字节，范围1024至16777216；无额外读取超时"},
             {"Name":"api-base-url","Type":"string","Description":"Factory API 地址；本地模拟需同时启用 allow-local-mock"},
@@ -627,10 +631,11 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
         "model.static" => Ok(json!({"Provider":PROVIDER,"Models":[]})),
         "model.for_auth" => {
             let rt = runtime()?;
-            let auth = factory::credential(data, "StorageJSON")?;
+            let mut auth = factory::credential(data, "StorageJSON")?;
             let account = auth["account_id"]
                 .as_str()
-                .ok_or_else(|| Fault::input("账号 ID 缺失"))?;
+                .ok_or_else(|| Fault::input("账号 ID 缺失"))?
+                .to_owned();
             let file = data["FileName"]
                 .as_str()
                 .or_else(|| data["AuthID"].as_str())
@@ -642,9 +647,24 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
             if !factory::observe_model_account(&rt, &auth, file)? {
                 return Ok(json!({"Provider":PROVIDER,"Models":[]}));
             }
+            let previous = auth.clone();
+            // Bootstrap legacy catalogs here. Expired public catalogs remain on
+            // CPA's auth.refresh schedule so discovery cannot postpone identity checks.
+            if rt.config.droid_cli_path.is_none()
+                && auth["disabled"] != true
+                && (auth["factory_catalog_source"].as_str() != Some(public_catalog::SOURCE)
+                    || auth["factory_catalog"]["version"] != 1)
+            {
+                access::refresh_catalog(
+                    &rt,
+                    &mut auth,
+                    data["host_callback_id"].as_str().unwrap_or(""),
+                )?;
+                access::restore_catalog(&rt, &auth)?;
+            }
             let store = rt.lock()?;
             let models: Vec<_> = store
-                .effective_models(account)
+                .effective_models(&account)
                 .iter()
                 .map(Model::host_json)
                 .collect();
@@ -657,10 +677,15 @@ pub fn dispatch(method: &str, data: &Value) -> Result<Value> {
                 .lock()
                 .map_err(|_| Fault::internal())?
                 .insert(
-                    account.into(),
+                    account,
                     management::CatalogObservation::new(data, &auth, offered),
                 );
-            Ok(json!({"Provider":PROVIDER,"Models":models}))
+            let mut response = json!({"Provider":PROVIDER,"Models":models});
+            if auth != previous {
+                response["AuthUpdate"] =
+                    factory::auth_data(&auth, data["AuthID"].as_str().unwrap_or(file), file);
+            }
+            Ok(response)
         }
         "management.register" => Ok(management::registration(data)),
         "management.handle" => Ok(management::handle(&runtime()?, data)),

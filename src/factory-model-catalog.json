@@ -1,0 +1,524 @@
+{
+  "source": "https://docs.factory.com/models.md",
+  "observed_at": "2026-11-11",
+  "candidates": [
+    {
+      "id": "claude-fable-5.2",
+      "displayName": "Claude Fable 5.2",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 3.2,
+      "deprecated": false
+    },
+    {
+      "id": "claude-fable-5.1",
+      "displayName": "Claude Fable 5.1",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 4.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-fable-5",
+      "displayName": "Claude Fable 5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 4.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-5-5",
+      "displayName": "Claude Opus 5.5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 1.6,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-5-5-fast",
+      "displayName": "Claude Opus 5.5 Fast",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 3.2,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-5",
+      "displayName": "Claude Opus 5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-5-fast",
+      "displayName": "Claude Opus 5 Fast",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 4.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-4-8",
+      "displayName": "Claude Opus 4.8",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-4-8-fast",
+      "displayName": "Claude Opus 4.8 Fast",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 4.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-4-7",
+      "displayName": "Claude Opus 4.7",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-4-6",
+      "displayName": "Claude Opus 4.6",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-opus-4-5-20251101",
+      "displayName": "Claude Opus 4.5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "displayName": "Claude Sonnet 5.5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "claude-sonnet-5",
+      "displayName": "Claude Sonnet 5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "displayName": "Claude Sonnet 4.6",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 1.2,
+      "deprecated": false
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "displayName": "Claude Sonnet 4.5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 1.2,
+      "deprecated": false
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "displayName": "Claude Haiku 5.5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 0.04,
+      "deprecated": false
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "displayName": "Claude Haiku 4.5",
+      "modelProvider": "anthropic",
+      "tokenMultiplier": 0.4,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6-astra",
+      "displayName": "GPT-6 Astra",
+      "modelProvider": "openai",
+      "tokenMultiplier": 4.0,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "displayName": "GPT-6.1 Sol",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6.1-sol-ultrafast",
+      "displayName": "GPT-6.1 Sol Ultra Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 4.8,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6-sol",
+      "displayName": "GPT-6 Sol",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6-sol-fast",
+      "displayName": "GPT-6 Sol Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 1.6,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "displayName": "GPT-5.6 Sol",
+      "modelProvider": "openai",
+      "tokenMultiplier": 1.6,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.6-sol-fast",
+      "displayName": "GPT-5.6 Sol Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 3.2,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6-luna",
+      "displayName": "GPT-6 Luna",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.04,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6-luna-fast",
+      "displayName": "GPT-6 Luna Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.08,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "displayName": "GPT-5.6 Luna",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.08,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "displayName": "GPT-6.1 Terra",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.4,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "displayName": "GPT-5.6 Terra",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.5",
+      "displayName": "GPT-5.5",
+      "modelProvider": "openai",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.5-fast",
+      "displayName": "GPT-5.5 Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 5.0,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "displayName": "GPT-5.5 Pro",
+      "modelProvider": "openai",
+      "tokenMultiplier": 12.0,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.4",
+      "displayName": "GPT-5.4",
+      "modelProvider": "openai",
+      "tokenMultiplier": 1.0,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.4-fast",
+      "displayName": "GPT-5.4 Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 2.0,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "displayName": "GPT-5.4 Mini",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.3,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.4-mini-fast",
+      "displayName": "GPT-5.4 Mini Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.6,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "displayName": "GPT-5.3-Codex",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.7,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.3-codex-fast",
+      "displayName": "GPT-5.3-Codex Fast",
+      "modelProvider": "openai",
+      "tokenMultiplier": 1.4,
+      "deprecated": false
+    },
+    {
+      "id": "gpt-5.2",
+      "displayName": "GPT-5.2",
+      "modelProvider": "openai",
+      "tokenMultiplier": 0.7,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-4-carbon",
+      "displayName": "Gemini 4 Carbon",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "displayName": "Gemini 3.1 Pro",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "displayName": "Gemini 3.8 Flash",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.3,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "displayName": "Gemini 3.7 Flash",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.3,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "displayName": "Gemini 3.6 Flash",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.6,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "displayName": "Gemini 3.5 Flash",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.6,
+      "deprecated": false
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "displayName": "Gemini 3 Flash",
+      "modelProvider": "google",
+      "tokenMultiplier": 0.2,
+      "deprecated": false
+    },
+    {
+      "id": "grok-4.7",
+      "displayName": "Grok 4.7",
+      "modelProvider": "xai",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "grok-4.6",
+      "displayName": "Grok 4.6",
+      "modelProvider": "xai",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "grok-4.5",
+      "displayName": "Grok 4.5",
+      "modelProvider": "xai",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "inkling",
+      "displayName": "Inkling",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.4,
+      "deprecated": false
+    },
+    {
+      "id": "mistral-large-4",
+      "displayName": "Mistral Large 4",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.544,
+      "deprecated": false
+    },
+    {
+      "id": "mistral-medium-3.5",
+      "displayName": "Mistral Medium 3.5",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.6,
+      "deprecated": false
+    },
+    {
+      "id": "glm-5.3-flash",
+      "displayName": "GLM-5.3-Flash",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.06,
+      "deprecated": false
+    },
+    {
+      "id": "glm-5.3",
+      "displayName": "GLM-5.3",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.56,
+      "deprecated": false
+    },
+    {
+      "id": "glm-5.2",
+      "displayName": "GLM-5.2",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.56,
+      "deprecated": false
+    },
+    {
+      "id": "glm-5.2-fast",
+      "displayName": "GLM-5.2 Fast",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.84,
+      "deprecated": false
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "displayName": "Kimi K3.1 Pro",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "kimi-k3",
+      "displayName": "Kimi K3",
+      "modelProvider": "factory",
+      "tokenMultiplier": 1.2,
+      "deprecated": false
+    },
+    {
+      "id": "qwen3.8-max",
+      "displayName": "Qwen3.8 Max",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.8,
+      "deprecated": false
+    },
+    {
+      "id": "nemotron-3.5-super",
+      "displayName": "Nemotron 3.5 Super",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.08,
+      "deprecated": false
+    },
+    {
+      "id": "nemotron-3-ultra",
+      "displayName": "Nemotron 3 Ultra",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.24,
+      "deprecated": false
+    },
+    {
+      "id": "deepseek-v4.1-flash-1017",
+      "displayName": "DeepSeek V4.1 Flash 1017",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.12,
+      "deprecated": false
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "displayName": "DeepSeek V4.1 Flash",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.12,
+      "deprecated": false
+    },
+    {
+      "id": "deepseek-v4-flash-0731",
+      "displayName": "DeepSeek V4 Flash 0731",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.176,
+      "deprecated": true
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "displayName": "DeepSeek V4 Pro",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.528,
+      "deprecated": true
+    },
+    {
+      "id": "minimax-m3.1-flash",
+      "displayName": "MiniMax M3.1 Flash",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.06,
+      "deprecated": false
+    },
+    {
+      "id": "minimax-m3",
+      "displayName": "MiniMax M3",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.12,
+      "deprecated": false
+    },
+    {
+      "id": "muse-spark-1.3",
+      "displayName": "Muse Spark 1.3",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.5,
+      "deprecated": false
+    },
+    {
+      "id": "muse-spark-1.2",
+      "displayName": "Muse Spark 1.2",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.5,
+      "deprecated": false
+    },
+    {
+      "id": "beam-1.0",
+      "displayName": "Beam 1.0",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.52,
+      "deprecated": false
+    },
+    {
+      "id": "minimax-m2.7",
+      "displayName": "MiniMax M2.7",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.12,
+      "deprecated": true
+    },
+    {
+      "id": "kimi-k2.5",
+      "displayName": "Kimi K2.5",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.25,
+      "deprecated": true
+    },
+    {
+      "id": "glm-5.1",
+      "displayName": "GLM-5.1",
+      "modelProvider": "factory",
+      "tokenMultiplier": 0.55,
+      "deprecated": true
+    }
+  ]
+}

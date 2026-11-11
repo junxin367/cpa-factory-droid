@@ -172,161 +172,10 @@ impl Model {
 }
 
 pub fn default_models() -> Vec<Model> {
-    // Snapshot checked against Factory Droid 0.242 registry on 2026-11-03.
-    // Deliberately excludes Fast/Ultra variants requiring separate opt-in.
-    let rows = [
-        (
-            "claude-opus-5-5",
-            "Opus 5.5",
-            "anthropic",
-            "anthropic",
-            872000,
-            128000,
-            1.6,
-            "standard",
-        ),
-        (
-            "claude-sonnet-5-5",
-            "Sonnet 5.5",
-            "anthropic",
-            "anthropic",
-            872000,
-            128000,
-            0.8,
-            "standard",
-        ),
-        (
-            "claude-haiku-5-5",
-            "Haiku 5.5",
-            "anthropic",
-            "anthropic",
-            872000,
-            128000,
-            0.04,
-            "standard",
-        ),
-        (
-            "claude-sonnet-4-6",
-            "Sonnet 4.6",
-            "anthropic",
-            "anthropic",
-            931000,
-            64000,
-            1.2,
-            "standard",
-        ),
-        (
-            "gpt-6.1-sol",
-            "GPT-6.1 Sol",
-            "responses",
-            "openai",
-            1050000,
-            128000,
-            0.8,
-            "standard",
-        ),
-        (
-            "gpt-6-sol",
-            "GPT-6 Sol",
-            "responses",
-            "openai",
-            1050000,
-            128000,
-            0.8,
-            "standard",
-        ),
-        (
-            "gpt-6-astra",
-            "GPT-6 Astra",
-            "responses",
-            "openai",
-            1050000,
-            128000,
-            4.0,
-            "standard",
-        ),
-        (
-            "gpt-5.4",
-            "GPT-5.4",
-            "responses",
-            "openai",
-            1050000,
-            128000,
-            1.0,
-            "standard",
-        ),
-        (
-            "gpt-5.3-codex",
-            "GPT-5.3 Codex",
-            "responses",
-            "openai",
-            400000,
-            128000,
-            0.7,
-            "standard",
-        ),
-        (
-            "glm-5.3",
-            "GLM 5.3",
-            "chat_completions",
-            "fireworks",
-            1040000,
-            131072,
-            0.56,
-            "core",
-        ),
-        (
-            "kimi-k3",
-            "Kimi K3",
-            "chat_completions",
-            "fireworks",
-            262144,
-            65536,
-            1.2,
-            "core",
-        ),
-        (
-            "deepseek-v4.1-flash",
-            "DeepSeek V4.1 Flash",
-            "chat_completions",
-            "fireworks",
-            1040000,
-            131072,
-            0.12,
-            "core",
-        ),
-        (
-            "minimax-m3",
-            "MiniMax M3",
-            "chat_completions",
-            "fireworks",
-            512000,
-            64000,
-            0.12,
-            "core",
-        ),
-    ];
-    rows.into_iter()
-        .map(
-            |(id, name, protocol, provider, context, output, rate, pool)| Model {
-                id: format!("factory/{id}"),
-                upstream_id: id.into(),
-                display_name: name.into(),
-                protocol: protocol.into(),
-                upstream_provider: provider.into(),
-                enabled: true,
-                context_length: context,
-                max_output_tokens: output,
-                input_multiplier: rate,
-                output_multiplier: rate,
-                cache_multiplier: rate,
-                cache_creation_multiplier: rate,
-                supports_images: Some(id != "glm-5.3"),
-                quota_pool: pool.into(),
-                quota_pool_source: "factory_registry".into(),
-                ..Model::default()
-            },
-        )
+    crate::public_catalog::bundled_candidates()
+        .iter()
+        .filter(|candidate| candidate["deprecated"] != true)
+        .filter_map(crate::catalog::model)
         .collect()
 }
 
@@ -591,7 +440,9 @@ impl Account {
             "last_checked_at":self.last_checked_at,
             "ready_model_count":state.effective_models(&self.id).len(),
             "model_source":self.discovery.source,
-            "catalog_checked_at":self.discovery.fetched_at
+            "catalog_checked_at":self.discovery.fetched_at,
+            "catalog_stale":self.discovery.stale,
+            "catalog_message":self.discovery.message
         })
     }
     pub fn pinned_id(&self, model: &Model) -> String {
