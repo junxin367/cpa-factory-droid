@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use crate::{factory, guard, host::Host, Fault};
 
 pub const DEFAULT_BODY_LIMIT: usize = 1024 * 1024;
+const POLICY_REJECTION: &str = "content_policy_rejected";
 
 pub fn body_prefix(value: &Value, limit: usize) -> Vec<u8> {
     let Some(encoded) = value.as_str() else {
@@ -47,7 +48,7 @@ pub fn read_error_stream(host: Host, stream: &str, limit: usize) -> Vec<u8> {
 pub fn fault(status: u16, headers: &Value, body: &[u8], limit: usize) -> Fault {
     let mut error = factory::upstream_error(status, headers);
     let raw = String::from_utf8_lossy(&body[..body.len().min(limit)]).into_owned();
-    let parsed = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+    let mut parsed = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
     let detail = if parsed["error"].is_object() {
         &parsed["error"]
     } else {
@@ -56,8 +57,8 @@ pub fn fault(status: u16, headers: &Value, body: &[u8], limit: usize) -> Fault {
     if !raw.is_empty() {
         error.message = detail["message"].as_str().unwrap_or(&raw).to_owned();
         if parsed.is_object() {
-            // Original error contents are intentional: no sanitizing,
-            // translated prefix, field removal, or upstream message replacement.
+            // Keep the original error unless the policy diagnostic needs to
+            // survive the host's error envelope.
             error.response_body = Some(raw);
         } else if body.len() > limit {
             error
@@ -72,7 +73,94 @@ pub fn fault(status: u16, headers: &Value, body: &[u8], limit: usize) -> Fault {
         .or_else(|| parsed["request_id"].as_str())
         .filter(|s| !s.is_empty() && s.len() <= 128)
         .map(str::to_owned);
+    if status == 403
+        && body.len() <= limit
+        && (detail["code"].as_str() == Some(POLICY_REJECTION)
+            || parsed["code"].as_str() == Some(POLICY_REJECTION))
+    {
+        add_policy_request_id(&mut error, &mut parsed, headers);
+    }
     error
+}
+
+fn valid_policy_request_id(id: &str) -> bool {
+    id.len() <= 128
+        && id.bytes().any(|b| b.is_ascii_alphanumeric())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+        && !["fk-", "sk-", "eyJ"]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+}
+
+fn add_policy_request_id(error: &mut Fault, body: &mut Value, headers: &Value) {
+    let nested = &body["error"];
+    let request_id = [
+        &body["requestId"],
+        &body["request_id"],
+        &nested["requestId"],
+        &nested["request_id"],
+    ]
+    .into_iter()
+    .filter_map(Value::as_str)
+    .chain(
+        ["request-id", "x-request-id"]
+            .into_iter()
+            .flat_map(|name| guard::header_values(headers, name)),
+    )
+    .find(|id| valid_policy_request_id(id))
+    .map(str::to_owned);
+    let Some(request_id) = request_id else {
+        return;
+    };
+    let reason = [
+        &nested["message"],
+        &body["message"],
+        &nested["detail"],
+        &body["detail"],
+    ]
+    .into_iter()
+    .filter_map(Value::as_str)
+    .find(|text| !text.trim().is_empty())
+    .unwrap_or("Factory 使用策略拒绝了此请求");
+    // CPA 的 Claude 错误外壳会丢弃独立的 requestId；仅这类 403 将 ID
+    // 写入宿主保留的 message，原有错误码、拒绝详情和诊断字段不移除。
+    let marker = format!("[{POLICY_REJECTION}; Factory requestId: {request_id}]");
+    let message = if reason.starts_with(&marker) {
+        reason.to_owned()
+    } else {
+        format!("{marker} {reason}")
+    };
+    let detail = if nested.is_object() {
+        &mut body["error"]
+    } else {
+        &mut *body
+    };
+    detail["message"] = json!(message);
+    error.code = POLICY_REJECTION.into();
+    error.request_id = Some(request_id);
+    error.message = message;
+    error.response_body = Some(body.to_string());
+}
+
+pub fn log_policy_rejection(host: Host, callback: &str, error: &Fault) {
+    let Some(request_id) = error
+        .request_id
+        .as_deref()
+        .filter(|_| error.code == POLICY_REJECTION)
+    else {
+        return;
+    };
+    // CPA 日志格式只显示部分结构化字段；关联 ID 放在文本中，宿主从当前上下文加上自己的短 ID。
+    let message = format!(
+        "Factory 使用策略拒绝了推理请求：status={} code={POLICY_REJECTION} factory_request_id={request_id}",
+        error.http_status
+    );
+    let _ = host.call(
+        "host.log",
+        &json!({"level":"warn","host_callback_id":callback,"message":message}),
+    );
 }
 
 pub fn retry_after(headers: &Value, now: DateTime<Utc>) -> Option<u64> {

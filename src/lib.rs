@@ -813,6 +813,7 @@ fn execute(rt: &Arc<Runtime>, data: &Value, stream: bool) -> Result<Value> {
         };
         access::invalidate_upstream(rt, &cred, &model, code);
         let error = upstream::fault(code, headers, &body, rt.error_body_limit());
+        upstream::log_policy_rejection(rt.host, cb, &error);
         if code == 413 && format == protocol::Format::Claude {
             if !retried {
                 if let Some(reduced) = request_size::retry(&mut http)? {
